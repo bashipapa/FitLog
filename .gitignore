@@ -1,0 +1,9 @@
+node_modules/
+.vercel
+.env
+.env.*
+native/node_modules/
+native/.expo/
+native/ios/
+native/android/
+.DS_Store

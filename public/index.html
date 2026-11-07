@@ -1,0 +1,1509 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#1f6f5a" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#131716" media="(prefers-color-scheme: dark)">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" sizes="180x180" href="/icon-180.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="FitLog">
+<style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
+<script>// claude.ai の外 (Vercel 上) で開かれたときだけ有効になる互換層。
+// ページ本体は claude.ai の runtime (sample / mcp) と同じ呼び方をするので、
+// ここで同じ形の関数を用意し、中身は /api/fitlog/* に投げる。
+;(function () {
+  if (window.claude && typeof window.claude.use === 'function') return
+  var key = function () {
+    try {
+      return localStorage.getItem('fitlog:key') || ''
+    } catch (e) {
+      return ''
+    }
+  }
+  function call(path, body) {
+    return fetch(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-fitlog-key': key() },
+      body: JSON.stringify(body),
+    })
+      .then(function (r) {
+        return r
+          .json()
+          .catch(function () {
+            return {}
+          })
+          .then(function (data) {
+            if (!r.ok)
+              throw {
+                code:
+                  data.code ||
+                  (r.status === 401
+                    ? 'bad_key'
+                    : r.status === 429
+                    ? 'rate_limited'
+                    : 'upstream_error'),
+                message: data.message || r.statusText,
+                text: data.text,
+              }
+            return data
+          })
+      })
+      .catch(function (e) {
+        if (e && e.code) throw e
+        throw { code: 'upstream_error', message: String((e && e.message) || e) }
+      })
+  }
+  // 送信前に長辺 1280px の JPEG に縮小する (転送量と API 制限のため)
+  function shrink(blob) {
+    return new Promise(function (res, rej) {
+      var url = URL.createObjectURL(blob)
+      var img = new Image()
+      img.onload = function () {
+        var s = Math.min(1, 1280 / Math.max(img.width, img.height))
+        var c = document.createElement('canvas')
+        c.width = Math.round(img.width * s)
+        c.height = Math.round(img.height * s)
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height)
+        URL.revokeObjectURL(url)
+        res(c.toDataURL('image/jpeg', 0.85))
+      }
+      img.onerror = function () {
+        URL.revokeObjectURL(url)
+        rej({ code: 'image_rejected', message: 'cannot decode image' })
+      }
+      img.src = url
+    })
+  }
+  function images(opts) {
+    var list =
+      opts && opts.images
+        ? opts.images instanceof Blob
+          ? [opts.images]
+          : Array.prototype.slice.call(opts.images)
+        : []
+    return Promise.all(list.map(shrink))
+  }
+  function sample(input, opts) {
+    opts = opts || {}
+    return images(opts)
+      .then(function (imgs) {
+        return call('/api/fitlog/ai', {
+          input: input,
+          images: imgs,
+          json: false,
+          tier: opts.modelTier || 'default',
+        })
+      })
+      .then(function (d) {
+        if (opts.onText) opts.onText({ text: d.text, delta: d.text })
+        return {
+          text: d.text,
+          truncated: !!d.truncated,
+          modelTierApplied: opts.modelTier || 'default',
+        }
+      })
+  }
+  sample.json = function (input, opts) {
+    opts = opts || {}
+    return images(opts)
+      .then(function (imgs) {
+        return call('/api/fitlog/ai', {
+          input: input,
+          images: imgs,
+          json: true,
+          tier: opts.modelTier || 'default',
+        })
+      })
+      .then(function (d) {
+        return d.value
+      })
+  }
+  sample.limits = function () {
+    return Promise.resolve({
+      maxPromptBytes: 262144,
+      images: {
+        maxCount: 5,
+        maxInputBytes: 20000000,
+        mediaTypes: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'],
+      },
+      modelTiers: ['default', 'complex', 'quick'],
+    })
+  }
+  var mcp = {
+    listTools: function () {
+      return call('/api/fitlog/notion', { tool: 'status' }).then(function (d) {
+        return {
+          servers: d.configured
+            ? [
+                {
+                  server: 'Notion',
+                  authStatus: 'connected',
+                  tools: [
+                    { name: 'notion-create-pages', description: '' },
+                    { name: 'notion-query-data-sources', description: '' },
+                  ],
+                },
+              ]
+            : [],
+        }
+      })
+    },
+    callTool: function (server, tool, input) {
+      return call('/api/fitlog/notion', { tool: tool, input: input }).then(
+        function (d) {
+          return { content: [], payload: d }
+        }
+      )
+    },
+    invalidate: function () {
+      return Promise.resolve()
+    },
+  }
+  window.__fitlogShim = { sample: sample, mcp: mcp }
+})()
+</script>
+</head>
+<body>
+<title>FitLog</title>
+<style>
+/* Layout: one-screen phone app; static forms, dynamic lists; fixed bottom tab bar. */
+:root {
+  --bg: #f4f6f2; --card: #ffffff; --fg: #1b201d; --muted: #66706b; --line: #dde3df;
+  --accent: #1f6f5a; --accent-ink: #ffffff; --accent-soft: #dcefe6;
+  --kcal: #c8742a; --good: #2a7a3b; --bad: #b83a2e; --warn: #a56a00;
+  --cp: #1a8a66; --cf: #d4731f; --cc: #3b6fc4;
+  --num: -apple-system, "SF Pro Display", "Roboto", "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif;
+  --body: -apple-system, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Roboto", system-ui, sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #131716; --card: #1d2320; --fg: #e9ece9; --muted: #98a39d; --line: #2c3430;
+  --accent: #5fcfa8; --accent-ink: #0f1a16; --accent-soft: #1f3a31;
+  --kcal: #e39a55; --good: #5ad07a; --bad: #ff7d6d; --warn: #e2b14d; --cp: #2a9c74; --cf: #cf7a2e; --cc: #5f94e0; color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #131716; --card: #1d2320; --fg: #e9ece9; --muted: #98a39d; --line: #2c3430;
+  --accent: #5fcfa8; --accent-ink: #0f1a16; --accent-soft: #1f3a31;
+  --kcal: #e39a55; --good: #5ad07a; --bad: #ff7d6d; --warn: #e2b14d; --cp: #2a9c74; --cf: #cf7a2e; --cc: #5f94e0; color-scheme: dark; }
+
+html, body { height: 100%; }
+body, main { touch-action: pan-y; }
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 15px; line-height: 1.5;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 0 calc(76px + env(safe-area-inset-bottom, 0px)); }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--bg); }
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+h1, h2, h3 { margin: 0; text-wrap: balance; }
+button, input, select { font: inherit; color: inherit; }
+
+.top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg); display: flex; align-items: center; justify-content: space-between; padding: 10px 0 8px; }
+.top h1 { font: 800 22px/1 var(--num); letter-spacing: .01em; }
+.top .date { color: var(--muted); font-size: 13px; }
+.view { display: flex; flex-direction: column; gap: 12px; }
+@keyframes slideL { from { transform: translateX(28px); opacity: .4; } to { transform: none; opacity: 1; } }
+@keyframes slideR { from { transform: translateX(-28px); opacity: .4; } to { transform: none; opacity: 1; } }
+.view.slide-l { animation: slideL .22s ease-out; } .view.slide-r { animation: slideR .22s ease-out; }
+@media (prefers-reduced-motion: reduce) { .view.slide-l, .view.slide-r { animation: none; } }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; min-width: 0; }
+.label { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+.big { font: 700 38px/1 var(--num); font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+.big small { font-size: 18px; color: var(--muted); margin-left: 2px; }
+.num { font-variant-numeric: tabular-nums; }
+.row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.row.between { justify-content: space-between; }
+.row.wrap { flex-wrap: wrap; }
+.grow { flex: 1; min-width: 0; }
+.stack { display: flex; flex-direction: column; gap: 8px; }
+.btn { border: 1px solid var(--line); background: var(--card); border-radius: 12px; padding: 13px 14px; font-weight: 700; cursor: pointer; text-align: center; min-height: 48px; }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.btn.danger { color: var(--bad); }
+.btn.sm { min-height: 38px; padding: 8px 12px; border-radius: 10px; font-weight: 500; }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn:focus-visible, input:focus-visible, .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+textarea.input { font-size: 14px; font-family: var(--body); resize: vertical; }
+.input { width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px; background: var(--bg); font-size: 17px; min-width: 0; }
+.stepper { display: grid; grid-template-columns: 48px 1fr 48px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--bg); }
+.stepper button { border: 0; background: transparent; font: 600 22px var(--num); min-height: 48px; cursor: pointer; }
+.stepper input { border: 0; text-align: center; background: transparent; font: 600 24px var(--num); min-width: 0; width: 100%; }
+.chips { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; -webkit-overflow-scrolling: touch; }
+.chip { flex: 0 0 auto; border: 1px solid var(--line); border-radius: 999px; padding: 8px 14px; background: var(--card); cursor: pointer; white-space: nowrap; }
+.chip.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.bar { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; margin-top: 8px; }
+.bar i { display: block; height: 100%; border-radius: 4px; background: var(--accent); }
+.bar.kcal i { background: var(--kcal); }
+.list { display: flex; flex-direction: column; }
+.item { display: flex; gap: 10px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); min-width: 0; }
+.item:first-child { border-top: 0; }
+.thumb { width: 56px; height: 56px; border-radius: 10px; object-fit: cover; background: var(--line); flex: 0 0 auto; }
+.thumb.lg { width: 100%; height: auto; aspect-ratio: 4/3; max-width: 100%; }
+.delta { font-weight: 700; font-variant-numeric: tabular-nums; }
+.up { color: var(--good); } .down { color: var(--bad); } .flat { color: var(--muted); }
+.pill { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--fg); }
+.toast { position: fixed; left: 50%; bottom: calc(90px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); background: var(--fg); color: var(--bg); padding: 10px 16px; border-radius: 10px; font-size: 14px; z-index: 20; max-width: 90vw; }
+.tabbar { position: fixed; left: 0; right: 0; bottom: 0; display: grid; grid-template-columns: repeat(6, 1fr); background: var(--card); border-top: 1px solid var(--line); z-index: 10;
+  padding-bottom: env(safe-area-inset-bottom, 0px); padding-left: env(safe-area-inset-left, 0px); padding-right: env(safe-area-inset-right, 0px); }
+.tab { border: 0; background: transparent; padding: 8px 0 6px; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 11px; color: var(--muted); cursor: pointer; }
+.tab svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.tab.on { color: var(--accent); font-weight: 700; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+td, th { padding: 7px 4px; text-align: left; border-top: 1px solid var(--line); font-size: 14px; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; border-top: 0; }
+td.r, th.r { text-align: right; }
+svg.chart { width: 100%; height: auto; display: block; }
+.chart text { fill: var(--muted); font-size: 11px; font-family: var(--body); }
+.chart .grid { stroke: var(--line); stroke-width: 1; }
+.chart .line { stroke: var(--accent); stroke-width: 2; fill: none; }
+.chart .area { fill: var(--accent); opacity: .12; }
+.chart .dot { fill: var(--accent); stroke: var(--card); stroke-width: 2; }
+.chart .vbar { fill: var(--accent); }
+.chart .vbar.today { fill: var(--kcal); }
+.ring { width: 110px; height: 110px; flex: 0 0 auto; }
+.ring circle { fill: none; stroke-width: 10; }
+.ring .track { stroke: var(--line); }
+.ring .fill { stroke: var(--kcal); stroke-linecap: round; transition: stroke-dashoffset .4s; }
+.sugg { white-space: pre-wrap; background: var(--accent-soft); border-radius: 10px; padding: 10px 12px; }
+.spin { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: sp .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
+@keyframes sp { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } .ring .fill { transition: none; } }
+details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.hbar { height: 10px; border-radius: 5px; background: var(--line); overflow: hidden; flex: 1; }
+.hbar i { display: block; height: 100%; background: var(--accent); border-radius: 5px; }
+.exhead { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.exhead h3 { font-size: 16px; font-weight: 700; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chart .vbar.dim { opacity: .45; }
+.pic { display: block; max-width: 100%; }
+.pic .limb { fill: none; stroke: var(--fg); stroke-width: 4.5; stroke-linecap: round; stroke-linejoin: round; }
+.pic .head { fill: var(--fg); }
+.pic .gear { fill: var(--accent); }
+.pic .gearl { stroke: var(--accent); stroke-width: 3; stroke-linecap: round; }
+.pic .gearl.thick { stroke-width: 5; }
+.pic .benchl { stroke: var(--muted); stroke-width: 4; stroke-linecap: round; opacity: .7; }
+.pic .benchr { fill: var(--muted); opacity: .6; }
+.pic .cablel { stroke: var(--accent); stroke-width: 2; stroke-dasharray: 3 3; }
+.pic .fB { display: none; }
+body.alt .pic .fA { display: none; }
+body.alt .pic .fB { display: block; }
+@media (prefers-reduced-motion: reduce) { .pic .fA { display: block !important; } .pic .fB { display: none !important; } }
+.exgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.extile { border: 1px solid var(--line); border-radius: 12px; background: var(--bg); padding: 8px 4px 6px; display: flex; flex-direction: column; align-items: center; gap: 2px; cursor: pointer; min-width: 0; }
+.extile span { font-size: 11px; line-height: 1.25; text-align: center; overflow-wrap: anywhere; }
+.extile.on { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.exsel { display: flex; align-items: center; gap: 10px; }
+.exsel .pic { width: 56px; height: 56px; flex: 0 0 auto; background: var(--accent-soft); border-radius: 10px; }
+.seg { display: grid; grid-template-columns: 1fr 1fr; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 3px; }
+.seg button { border: 0; background: transparent; border-radius: 9px; padding: 9px; font-weight: 700; color: var(--muted); cursor: pointer; }
+.seg button.on { background: var(--accent); color: var(--accent-ink); }
+.pfc { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+.pfc .m { min-width: 0; }
+.pfc .m b { display: block; font: 600 24px/1.1 var(--num); font-variant-numeric: tabular-nums; }
+.pfc .m b small { font-size: 13px; color: var(--muted); font-weight: 500; }
+.pfc .bar { margin-top: 6px; }
+.pfc .m.p i { background: var(--cp); } .pfc .m.f i { background: var(--cf); } .pfc .m.c i { background: var(--cc); }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; vertical-align: -1px; margin-right: 4px; }
+.stackbar { display: flex; height: 22px; border-radius: 6px; overflow: hidden; gap: 2px; background: var(--line); }
+.stackbar i { display: flex; align-items: center; justify-content: center; font: 600 11px var(--num); color: #fff; min-width: 0; overflow: hidden; white-space: nowrap; }
+.stackbar i.p { background: var(--cp); } .stackbar i.f { background: var(--cf); } .stackbar i.c { background: var(--cc); }
+.ratio { display: grid; grid-template-columns: 34px 1fr; gap: 6px 8px; align-items: center; margin-top: 8px; }
+.grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.cal { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin-top: 8px; }
+.cdow { text-align: center; font-size: 11px; color: var(--muted); padding: 2px 0; }
+.cday { border: 1px solid transparent; background: transparent; border-radius: 10px; min-height: 46px; padding: 3px 0; display: flex; flex-direction: column; align-items: center; gap: 1px; font-size: 13px; cursor: pointer; }
+.cday.empty { cursor: default; }
+.cday.has { background: var(--accent-soft); border-color: var(--line); }
+.cday.has i { font-style: normal; font-size: 10px; font-weight: 700; color: var(--accent); }
+.cday.today span { font-weight: 800; text-decoration: underline; text-underline-offset: 3px; }
+.cday.sel { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.quick { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+.qbtn { border: 1px solid var(--line); background: var(--card); border-radius: 12px; min-height: 70px; padding: 6px 2px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; cursor: pointer; min-width: 0; }
+.qbtn:active { background: var(--accent-soft); }
+.qbtn b { font: 700 22px/1 var(--num); font-variant-numeric: tabular-nums; }
+.qbtn span { font-size: 10.5px; line-height: 1.15; text-align: center; word-break: break-all; max-width: 100%; }
+.qbtn.on { border-color: var(--accent); background: var(--accent-soft); }
+.taps { display: flex; flex-wrap: wrap; gap: 6px; }
+.tap { font-size: 12px; padding: 3px 8px; border-radius: 999px; background: var(--accent-soft); font-variant-numeric: tabular-nums; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.stat { text-align: center; }
+.stat b { display: block; font: 600 22px/1.2 var(--num); font-variant-numeric: tabular-nums; }
+.switch { width: 46px; height: 28px; border-radius: 14px; background: var(--line); border: 0; position: relative; cursor: pointer; flex: 0 0 auto; }
+.switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: var(--card); transition: left .15s; }
+.switch.on { background: var(--accent); } .switch.on::after { left: 21px; }
+</style>
+
+<header class="top">
+  <div><h1>FitLog</h1><div class="date" id="topDate"></div></div>
+  <button class="btn sm" id="gotoSettings" aria-label="設定">設定</button>
+</header>
+
+<main>
+  <!-- 今日 -->
+  <section class="view" id="view-today">
+    <div class="card">
+      <div class="label">今日の食事</div>
+      <div class="row between">
+        <div class="grow">
+          <div class="big"><span id="tKcal">0</span><small>kcal</small></div>
+          <div class="muted small" id="tKcalLeft">目標まで —</div>
+          <div class="bar kcal"><i id="tKcalBar" style="width:0%"></i></div>
+          <div class="row between" style="margin-top:10px"><span class="small">たんぱく質 <b class="num" id="tP">0</b> g</span><span class="muted small" id="tPLeft"></span></div>
+          <div class="bar"><i id="tPBar" style="width:0%"></i></div>
+        </div>
+        <svg class="ring" viewBox="0 0 110 110" aria-hidden="true"><circle class="track" cx="55" cy="55" r="46"></circle><circle class="fill" id="ringFill" cx="55" cy="55" r="46" transform="rotate(-90 55 55)"></circle></svg>
+      </div>
+      <button class="btn primary" style="margin-top:12px;width:100%" data-go="meals" data-capture="1">写真で食事を記録</button>
+    </div>
+    <div class="card">
+      <div class="label">体重</div>
+      <div id="tWeight" class="muted">まだ記録がありません</div>
+    </div>
+    <div class="card">
+      <div class="label">今日の筋トレ</div>
+      <div id="tWorkout" class="muted">まだ記録なし</div>
+      <button class="btn" style="margin-top:10px;width:100%" data-go="workout">セットを記録</button>
+    </div>
+    <div class="card">
+      <div class="label">次のサプリ</div>
+      <div id="tSupp" class="muted">サプリタブでスケジュールを作成できます</div>
+    </div>
+    <div class="card" id="mealSuggCard" hidden>
+      <div class="label">直近の提案</div>
+      <div class="sugg" id="tSugg"></div>
+    </div>
+  </section>
+
+  <!-- 食事 -->
+  <section class="view" id="view-meals" hidden>
+    <div class="card">
+      <div class="row between"><div class="label">PFCバランス (今日)</div><div class="small muted num" id="pfcKcal"></div></div>
+      <div class="pfc" id="pfcBars"></div>
+      <div class="ratio" id="pfcRatio"></div>
+      <div class="small muted" style="margin-top:6px" id="pfcNote"></div>
+    </div>
+    <div class="card stack">
+      <div class="row between"><div class="label">次の食事の提案</div><button class="btn sm" id="askSugg">今の状況で提案</button></div>
+      <div class="sugg" id="mealSugg">食事を記録するか「今の状況で提案」を押すと、残りのkcalとPFCに合わせた提案が出ます。</div>
+      <div class="small muted" id="suggMeta"></div>
+    </div>
+    <div class="card stack">
+      <div class="label">食事を記録</div>
+      <input class="input" id="mealHint" placeholder="補足(任意) 例: ご飯少なめ、ドレッシングなし">
+      <div class="grid2">
+        <label class="btn primary" for="mealCam">カメラで撮影</label>
+        <label class="btn" for="mealLib">写真を選ぶ</label>
+      </div>
+      <input type="file" id="mealCam" accept="image/*" capture="environment" hidden>
+      <input type="file" id="mealLib" accept="image/*" hidden>
+      <div class="muted small" id="mealStatus" hidden></div>
+    </div>
+    <div class="card stack" id="mealDraft" hidden></div>
+    <div class="card">
+      <div class="label">履歴</div>
+      <div class="list" id="mealList"></div>
+    </div>
+  </section>
+
+  <!-- 飲み会 -->
+  <section class="view" id="view-nomikai" hidden>
+    <div class="card">
+      <div class="row between"><button class="btn sm" id="calPrev" aria-label="前の月">‹</button><b id="calTitle"></b><button class="btn sm" id="calNext" aria-label="次の月">›</button></div>
+      <div class="cal" id="calGrid"></div>
+      <div class="grid4" id="calSummary" style="margin-top:10px"></div>
+      <div class="list" id="calDetail"></div>
+    </div>
+    <div class="card stack">
+      <div class="row between"><div class="label">飲み会を記録</div><button class="btn sm" id="nClear">クリア</button></div>
+      <div class="grid2">
+        <input class="input" id="nShop" placeholder="店の名前">
+        <input class="input" id="nDate" type="date">
+      </div>
+      <div class="label">参加者</div>
+      <div class="chips" id="nPeople"></div>
+      <div class="row"><input class="input" id="nNewPerson" placeholder="一覧にない人・会の名前"><button class="btn sm" id="nAddPerson" style="white-space:nowrap">追加</button></div>
+      <div class="row between"><div class="label">杯数 (タップで1杯、時刻を記録)</div><div><span class="big" style="font-size:30px" id="nCups">0</span> <span class="muted">杯</span></div></div>
+      <div class="quick" id="nQuick"></div>
+      <div class="row wrap" id="nMore"></div>
+      <div class="row between"><div class="small muted" id="nPace"></div><button class="btn sm" id="nUndo">1杯取り消し</button></div>
+      <div class="taps" id="nTaps"></div>
+      <div class="grid3">
+        <div><div class="label">石橋支払い</div><input class="input" id="nPay" inputmode="numeric" placeholder="円"></div>
+        <div><div class="label">タクシー費用</div><input class="input" id="nTaxi" inputmode="numeric" placeholder="円"></div>
+        <div><div class="label">タクシー場所</div><input class="input" id="nTaxiPlace" placeholder="例 西宮北口"></div>
+      </div>
+      <button class="btn primary" id="nomiSave">Notionに記録</button>
+      <div class="row between"><div class="small muted grow" id="nomiSync">Notion接続を確認中…</div><button class="btn sm" id="nomiRefresh">再読込</button></div>
+      <div class="small muted">飲んでいる最中は杯数の＋を押すだけでOK。入力途中の内容は端末に残ります。<a href="https://app.notion.com/p/3cf821f36a98808983eefb4234ee331f" target="_blank" rel="noopener">Notionの飲み会DBを開く</a></div>
+    </div>
+    <div class="card">
+      <div class="label">履歴</div>
+      <div class="list" id="nomiList"></div>
+    </div>
+  </section>
+
+  <!-- 筋トレ -->
+  <section class="view" id="view-workout" hidden>
+    <div class="seg" id="wkSeg"><button class="on" data-seg="log">記録</button><button data-seg="growth">成長</button></div>
+    <div class="view" id="wkLog">
+    <div class="card stack">
+      <div class="label">種目</div>
+      <div class="exsel" id="exSel" hidden><div id="exSelPic"></div><div class="grow"><b id="exSelName"></b><div class="muted small" id="exSelGroup"></div></div><button class="btn sm" id="exChange">変更</button></div>
+      <div id="exPicker">
+        <div class="chips" id="grpChips"></div>
+        <div class="exgrid" id="exGrid"></div>
+        <input class="input" id="exName" placeholder="一覧にない種目は名前を入力" style="margin-top:8px">
+      </div>
+      <div class="grid2">
+        <div><div class="label">重量 kg</div>
+          <div class="stepper"><button type="button" data-step="kg" data-d="-2.5">−</button><input id="kg" inputmode="decimal" value="0"><button type="button" data-step="kg" data-d="2.5">+</button></div></div>
+        <div><div class="label">回数</div>
+          <div class="stepper"><button type="button" data-step="reps" data-d="-1">−</button><input id="reps" inputmode="numeric" value="10"><button type="button" data-step="reps" data-d="1">+</button></div></div>
+      </div>
+      <button class="btn primary" id="addSet">セットを記録</button>
+    </div>
+    <div class="card" id="cmpCard" hidden>
+      <div class="row between"><div class="label" id="cmpTitle">今日 vs 前回</div></div>
+      <div class="grid3" id="cmpStats"></div>
+      <table id="cmpTable"></table>
+    </div>
+    <div class="card" id="histCard" hidden>
+      <div class="label" id="histTitle">推移</div>
+      <div id="histChart"></div>
+      <div class="muted small" id="histNote"></div>
+    </div>
+    <div class="card">
+      <div class="label">今日の記録</div>
+      <div class="list" id="todaySets"></div>
+    </div>
+    <div class="card stack">
+      <div class="label">過去履歴の取り込み</div>
+      <p class="small muted" style="margin:0">筋トレMEMOの履歴画面のスクリーンショット(複数可)を選ぶと、AIが日付・種目・重量・回数を読み取ります。年が写っていない画面用に年を指定してください。</p>
+      <div class="grid2">
+        <input class="input" id="impYear" inputmode="numeric" placeholder="年 (例 2025)">
+        <label class="btn primary" for="impShots">スクショを選ぶ</label>
+      </div>
+      <input type="file" id="impShots" accept="image/*" multiple hidden>
+      <details><summary>CSV / テキストから取り込む</summary>
+        <div class="stack" style="margin-top:8px">
+          <textarea class="input" id="impText" rows="5" placeholder="1行1セット。例:&#10;2025/11/03, ベンチプレス, 60, 10&#10;2025/11/03, ベンチプレス, 60, 8&#10;形式が違っても「AIで整形」で読み取ります"></textarea>
+          <div class="grid2"><button class="btn" id="impParse">そのまま読む</button><button class="btn" id="impAI">AIで整形</button></div>
+        </div></details>
+      <div class="muted small" id="impStatus" hidden></div>
+      <div id="impPreview" hidden></div>
+    </div>
+    </div>
+    <div class="view" id="wkGrowth" hidden>
+
+    <div class="chips" id="rangeChips">
+      <button class="chip" data-range="4">4週</button><button class="chip on" data-range="12">12週</button><button class="chip" data-range="26">半年</button><button class="chip" data-range="52">1年</button><button class="chip" data-range="0">全期間</button>
+    </div>
+    <div class="card">
+      <div class="label">週ごとの総負荷量 (重量×回数の合計)</div>
+      <div id="gLoadHead" class="row between"></div>
+      <div id="gLoadChart"></div>
+      <div class="muted small" id="gLoadNote"></div>
+    </div>
+    <div class="card">
+      <div class="label">負荷量の内訳 (期間内)</div>
+      <div id="gShare"></div>
+    </div>
+    <div class="label" style="margin-top:4px">種目ごとの成長軌道 (推定1RM)</div>
+    <div id="gExercises" class="view"></div>
+    </div>
+  </section>
+
+
+  <!-- 体重 -->
+  <section class="view" id="view-weight" hidden>
+    <div class="card">
+      <div class="label">最新</div>
+      <div id="wLatest" class="muted">まだ記録がありません</div>
+      <div id="wChart"></div>
+    </div>
+    <div class="card stack">
+      <div class="label">記録する</div>
+      <div class="grid2">
+        <input class="input" id="wKg" inputmode="decimal" placeholder="体重 kg">
+        <input class="input" id="wFat" inputmode="decimal" placeholder="体脂肪 % (任意)">
+      </div>
+      <button class="btn primary" id="saveWeight">保存</button>
+      <label class="btn" for="scaleCam">体重計を撮影して読み取り</label>
+      <input type="file" id="scaleCam" accept="image/*" capture="environment" hidden>
+      <div class="muted small" id="wStatus" hidden></div>
+      <details><summary>eufyの体重計から取り込むには</summary>
+        <p class="small muted">EufyLifeアプリはApple Health / Health Connectに同期できますが、このWeb版はそれらを読めません。体重計の表示を撮影するとAIが数値を読み取ります。自動取り込みはネイティブアプリ版(iOS)で対応します。</p></details>
+    </div>
+    <div class="card">
+      <div class="label">履歴</div>
+      <div class="list" id="wList"></div>
+    </div>
+  </section>
+
+  <!-- サプリ -->
+  <section class="view" id="view-supps" hidden>
+    <div class="card stack">
+      <div class="label">おすすめスケジュール</div>
+      <p class="small muted" style="margin:0">設定の起床・トレーニング・就寝時刻から、プロテイン(起床後/トレ後/就寝前)・クレアチン・マルチビタミンの時刻を提案します。</p>
+      <button class="btn primary" id="genPlan">提案を生成</button>
+      <div class="grid2">
+        <input class="input" id="sName" placeholder="名前 (例 EAA)">
+        <input class="input" id="sTime" type="time" value="07:30">
+      </div>
+      <button class="btn" id="addSupp">追加</button>
+    </div>
+    <div class="card">
+      <div class="label">今日の予定</div>
+      <div class="list" id="suppList"></div>
+      <p class="small muted" style="margin:10px 0 0">Web版はプッシュ通知を出せません。各時刻はスマホのアラームにも登録してください。ホーム画面に追加すると開くたびに次の予定が見えます。</p>
+    </div>
+  </section>
+
+  <!-- 設定 -->
+  <section class="view" id="view-settings" hidden>
+    <div class="card stack">
+      <div class="label">目標</div>
+      <div class="chips" id="goalChips">
+        <button class="chip" data-goal="cut">減量</button><button class="chip" data-goal="maintain">維持</button><button class="chip" data-goal="bulk">増量</button>
+      </div>
+      <div class="grid2">
+        <div><div class="label">1日の kcal</div><input class="input" id="pKcal" inputmode="numeric"></div>
+        <div><div class="label">たんぱく質 g</div><input class="input" id="pProt" inputmode="numeric"></div>
+      </div>
+      <div class="grid2">
+        <div><div class="label">脂質 g (空欄で自動)</div><input class="input" id="pFat" inputmode="numeric" placeholder="自動"></div>
+        <div><div class="label">炭水化物 g (空欄で自動)</div><input class="input" id="pCarb" inputmode="numeric" placeholder="自動"></div>
+      </div>
+      <div class="small muted">自動: 脂質はkcalの25%、炭水化物は残りから計算します。</div>
+    </div>
+    <div class="card stack">
+      <div class="label">生活リズム (サプリ時刻の計算に使用)</div>
+      <div class="grid3">
+        <div><div class="label">起床</div><input class="input" id="pWake" type="time"></div>
+        <div><div class="label">トレ開始</div><input class="input" id="pTrain" type="time"></div>
+        <div><div class="label">就寝</div><input class="input" id="pBed" type="time"></div>
+      </div>
+    </div>
+    <div class="card stack" id="keyCard" hidden>
+      <div class="label">アクセスキー (Web版)</div>
+      <input class="input" id="pKey" placeholder="サーバーに設定した FITLOG_PASSCODE" autocapitalize="none">
+      <div class="small muted">AI解析とNotion連携のAPIを守るための合言葉です。この端末に保存されます。</div>
+    </div>
+    <button class="btn primary" id="saveProfile">保存</button>
+    <div class="muted small" id="storeNote"></div>
+  </section>
+</main>
+
+<nav class="tabbar" aria-label="メイン">
+  <button class="tab" data-go="today"><svg viewBox="0 0 24 24"><path d="M3 11 12 4l9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>今日</button>
+  <button class="tab" data-go="meals"><svg viewBox="0 0 24 24"><path d="M7 3v8M5 3v5a2 2 0 0 0 4 0V3M7 11v10M17 3c-2 0-3 3-3 6v3h3v9"/></svg>食事</button>
+  <button class="tab" data-go="nomikai"><svg viewBox="0 0 24 24"><path d="M6 4h10v16H6zM16 8h3a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-3M9 9v8M12 9v8"/></svg>飲み会</button>
+  <button class="tab" data-go="workout"><svg viewBox="0 0 24 24"><path d="M2 12h3M19 12h3M5 8v8M19 8v8M8 6v12M16 6v12M8 12h8"/></svg>筋トレ</button>
+  <button class="tab" data-go="weight"><svg viewBox="0 0 24 24"><path d="M4 4h16v16H4zM8 10a4 4 0 0 1 8 0M12 10l2-3"/></svg>体重</button>
+  <button class="tab" data-go="supps"><svg viewBox="0 0 24 24"><path d="M9.5 4.5l10 10a3.5 3.5 0 0 1-5 5l-10-10a3.5 3.5 0 0 1 5-5zM7 12l5-5"/></svg>サプリ</button>
+</nav>
+
+<script>
+(() => {
+'use strict';
+const $ = (id) => document.getElementById(id);
+const r0 = (n) => String(Math.round(n || 0));
+const r1 = (n) => (Math.round((n || 0) * 10) / 10).toFixed(1);
+const pad = (n) => String(n).padStart(2, '0');
+const dateKey = (ts) => { const d = new Date(ts); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; };
+const hhmm = (ts) => { const d = new Date(ts); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const md = (key) => { const [, m, d] = key.split('-'); return `${+m}/${+d}`; };
+const signed = (n, dg = 0) => { const v = dg ? (Math.round(n * 10 ** dg) / 10 ** dg).toFixed(dg) : String(Math.round(n)); return n > 0 ? '+' + v : v; };
+const cls = (n) => n > 0 ? 'up' : n < 0 ? 'down' : 'flat';
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const nowHM = () => hhmm(Date.now());
+let toastT; const toast = (m) => { let el = $('toast'); if (!el) { el = document.createElement('div'); el.id = 'toast'; el.className = 'toast'; document.body.appendChild(el); } el.textContent = m; el.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => el.hidden = true, 2600); };
+
+// ---------- state & store ----------
+const DEF_PROFILE = { kcalTarget: 2200, proteinTarget: 140, fatTarget: null, carbTarget: null, wake: '07:00', train: '19:00', bed: '23:30', goal: 'bulk' };
+function targets() {
+  const p = S.profile; const kcal = p.kcalTarget || 2200; const pr = p.proteinTarget || 140;
+  const f = p.fatTarget || Math.round(kcal * 0.25 / 9);
+  const c = p.carbTarget || Math.max(0, Math.round((kcal - pr * 4 - f * 9) / 4));
+  return { kcal, p: pr, f, c };
+}
+const S = { meals: [], sessions: [], sets: [], legacy: [], weights: [], supps: [], nomikai: [], profile: { ...DEF_PROFILE }, suggestion: null, loaded: false, readOnly: false };
+let db = null, sample = null, sampleImages = false;
+const COLLS = ['meals', 'sessions', 'weights', 'supps', 'nomikai', 'sets'];
+const COLL_ORDER = { sessions: 'date', sets: 'ts', meals: 'ts', weights: 'ts', supps: 'ts', nomikai: 'ts' };
+// A session is one exercise on one day; its sets live inside the document.
+function rebuildSets() {
+  const out = [];
+  for (const ss of S.sessions) (ss.sets || []).forEach((x, i) => out.push({ id: ss.id + ':' + i, sid: ss.id, idx: i + 1, date: ss.date, exercise: ss.exercise, kg: +x.kg || 0, reps: +x.reps || 0, ts: x.ts || ss.ts }));
+  S.sets = out.sort((a, b) => a.ts - b.ts);
+}
+
+const Local = {
+  read(k) { try { return JSON.parse(localStorage.getItem('fitlog:' + k) || 'null'); } catch { return null; } },
+  write(k, v) { try { localStorage.setItem('fitlog:' + k, JSON.stringify(v)); } catch {} },
+};
+const Store = {
+  async init() {
+    // Paint immediately from the last snapshot this browser saw, then let the live store overwrite it.
+    for (const c of COLLS) if (c !== 'sets') S[c] = Local.read(c) || [];
+    S.profile = { ...DEF_PROFILE, ...(Local.read('profile') || {}) };
+    S.suggestion = Local.read('suggestion');
+    rebuildSets(); S.loaded = true; renderAll();
+    db = await window.claude?.use?.('db').catch(() => null) ?? null;
+    if (db) {
+      let confirmed = 0; const total = COLLS.length - 1;
+      for (const c of COLLS) {
+        db.collection(c).orderBy(COLL_ORDER[c], 'desc').limit(c === 'sessions' ? 1000 : 400).onSnapshot((snap) => {
+          const key = c === 'sets' ? 'legacy' : c;
+          S[key] = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+          if (c === 'sessions') rebuildSets();
+          if (c === 'sets') migrateLegacy();
+          else if (!snap.metadata.fromCache) { Local.write(c, c === 'meals' ? S[c].slice(0, 40) : S[c]); if (++confirmed === total) S.synced = true; }
+          renderAll();
+        }, (e) => { console.warn(c, e); });
+      }
+      db.doc('settings/suggestion').onSnapshot((snap) => { if (snap.exists) { S.suggestion = snap.data(); Local.write('suggestion', S.suggestion); } renderAll(); }, () => {});
+      db.doc('settings/profile').onSnapshot((snap) => { if (snap.exists) { S.profile = { ...DEF_PROFILE, ...snap.data() }; Local.write('profile', S.profile); } renderAll(); }, () => {});
+      setTimeout(() => { if (!S.synced) toast('最新データの取得に時間がかかっています(表示は前回の内容)'); }, 10000);
+      $('storeNote').textContent = 'データはこのアーティファクトの保存領域に保存され、どの端末からも同じ記録が見えます。';
+    } else {
+      $('storeNote').textContent = 'この表示ではデータはこのブラウザ内にのみ保存されます。';
+    }
+  },
+  async add(c, data) {
+    const id = uid(); const doc = { id, ...data };
+    if (db) { try { await db.collection(c).doc(id).set(data); } catch (e) { return fail(e); } }
+    else { S[c] = [doc, ...S[c]].sort((a, b) => b.ts - a.ts); Local.write(c, S[c]); if (c === 'sessions') rebuildSets(); renderAll(); }
+    return id;
+  },
+  async update(c, id, patch) {
+    if (db) { try { await db.collection(c).doc(id).update(patch); } catch (e) { return fail(e); } }
+    else { S[c] = S[c].map((d) => d.id === id ? { ...d, ...patch } : d); Local.write(c, S[c]); if (c === 'sessions') rebuildSets(); renderAll(); }
+  },
+  async del(c, id) {
+    if (db) { try { await db.collection(c).doc(id).delete(); } catch (e) { return fail(e); } }
+    else { S[c] = S[c].filter((d) => d.id !== id); Local.write(c, S[c]); if (c === 'sessions') rebuildSets(); renderAll(); }
+  },
+  async saveSuggestion(text, source) {
+    const doc = { text, ts: Date.now(), source };
+    S.suggestion = doc;
+    if (db) { try { await db.doc('settings/suggestion').set(doc); } catch (e) { return fail(e); } }
+    else { Local.write('suggestion', doc); renderAll(); }
+  },
+  async saveProfile(p) {
+    S.profile = p;
+    if (db) { try { await db.doc('settings/profile').set(p); } catch (e) { return fail(e); } }
+    else { Local.write('profile', p); renderAll(); }
+  },
+};
+let migrating = false;
+async function migrateLegacy() {
+  if (!db || migrating || !S.legacy.length) return;
+  migrating = true;
+  try {
+    const groups = {};
+    for (const x of [...S.legacy].sort((a, b) => a.ts - b.ts)) (groups[x.date + '|' + x.exercise] ||= []).push(x);
+    for (const k of Object.keys(groups)) {
+      const g = groups[k];
+      const ex = S.sessions.find((ss) => ss.date === g[0].date && ss.exercise === g[0].exercise);
+      if (ex) await db.collection('sessions').doc(ex.id).update({ sets: [...(ex.sets || []), ...g.map((x) => ({ kg: x.kg, reps: x.reps, ts: x.ts }))] });
+      else await db.collection('sessions').doc(uid()).set({ ts: g[0].ts, date: g[0].date, exercise: g[0].exercise, sets: g.map((x) => ({ kg: x.kg, reps: x.reps, ts: x.ts })) });
+      for (const x of g) await db.collection('sets').doc(x.id).delete();
+    }
+  } catch (e) { console.warn('migrate', e); }
+  migrating = false;
+}
+function fail(e) { console.warn(e); if (e?.code === 'invalid_argument') { S.readOnly = true; toast('この表示では書き込みできません(閲覧のみ)'); } else if (e?.code === 'quota_exceeded') toast('保存容量がいっぱいです。古い記録を削除してください'); else toast('保存に失敗しました。もう一度お試しください'); return null; }
+
+// ---------- derived ----------
+const today = () => dateKey(Date.now());
+const mealsOn = (key) => S.meals.filter((m) => dateKey(m.ts) === key);
+const totals = (key) => mealsOn(key).reduce((a, m) => ({ kcal: a.kcal + (m.kcal||0), p: a.p + (m.p||0), f: a.f + (m.f||0), c: a.c + (m.c||0), n: a.n + 1 }), { kcal: 0, p: 0, f: 0, c: 0, n: 0 });
+const setsOn = (ex, key) => S.sets.filter((s) => s.exercise === ex && s.date === key).sort((a, b) => a.idx - b.idx);
+const findSession = (ex, key) => S.sessions.find((ss) => ss.exercise === ex && ss.date === key);
+const prevDate = (ex, key) => { const ds = [...new Set(S.sets.filter((s) => s.exercise === ex && s.date < key).map((s) => s.date))].sort(); return ds[ds.length - 1] || null; };
+const e1rm = (s) => s.kg * (1 + s.reps / 30);
+const sessionStats = (ex) => { const by = {}; for (const s of S.sets) if (s.exercise === ex) (by[s.date] ||= []).push(s); return Object.keys(by).sort().map((date) => { const ss = by[date]; return { date, sets: ss.length, volume: ss.reduce((a, s) => a + s.kg * s.reps, 0), max: Math.max(...ss.map((s) => s.kg)), best: Math.max(...ss.map(e1rm)) }; }); };
+
+// ---------- navigation ----------
+const VIEWS = ['today', 'meals', 'nomikai', 'workout', 'weight', 'supps', 'settings'];
+let current = 'today';
+function go(name) {
+  if (!VIEWS.includes(name)) name = 'today';
+  current = name;
+  for (const v of VIEWS) $('view-' + v).hidden = v !== name;
+  document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('on', t.dataset.go === name));
+  if (location.hash.slice(1) !== name) history.replaceState(null, '', '#' + name);
+  window.scrollTo(0, 0);
+  renderAll();
+}
+window.addEventListener('hashchange', () => go(location.hash.slice(1) || 'today'));
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-go]'); if (!b) return;
+  go(b.dataset.go);
+  if (b.dataset.capture) setTimeout(() => $('mealCam').click(), 50);
+});
+$('gotoSettings').addEventListener('click', () => go('settings'));
+// Swipe left/right anywhere in the content area moves to the neighbouring tab.
+// Decided during the move (not on release): hosts that take over horizontal gestures often cancel the touch before touchend.
+const TABS = ['today', 'meals', 'nomikai', 'workout', 'weight', 'supps'];
+let sw = null;
+function swipeTo(dir) {
+  const i = TABS.indexOf(current); if (i < 0) return;
+  const next = TABS[i + dir]; if (!next) return;
+  const view = $('view-' + next); view.classList.remove('slide-l', 'slide-r'); void view.offsetWidth; view.classList.add(dir > 0 ? 'slide-l' : 'slide-r');
+  go(next);
+}
+function gestureStart(x, y, target) {
+  if (target.closest && target.closest('.chips, input, textarea, select, .stepper, .tabbar, .seg')) { sw = null; return; }
+  sw = { x, y, t: Date.now(), done: false };
+}
+function gestureMove(x, y) {
+  if (!sw || sw.done) return;
+  const dx = x - sw.x, dy = y - sw.y;
+  if (Date.now() - sw.t > 900 || Math.abs(dy) > 50 && Math.abs(dy) > Math.abs(dx)) { sw.done = true; return; } // vertical scroll or too slow
+  if (Math.abs(dx) >= 60 && Math.abs(dx) > Math.abs(dy) * 1.6) { sw.done = true; swipeTo(dx < 0 ? 1 : -1); }
+}
+const gestureEnd = () => { sw = null; };
+if (window.PointerEvent) {
+  document.addEventListener('pointerdown', (e) => { if (e.pointerType === 'touch' && e.isPrimary) gestureStart(e.clientX, e.clientY, e.target); }, { passive: true });
+  document.addEventListener('pointermove', (e) => { if (e.pointerType === 'touch' && e.isPrimary) gestureMove(e.clientX, e.clientY); }, { passive: true });
+  document.addEventListener('pointerup', gestureEnd, { passive: true });
+  document.addEventListener('pointercancel', gestureEnd, { passive: true });
+} else {
+  document.addEventListener('touchstart', (e) => { if (e.touches.length === 1) gestureStart(e.touches[0].clientX, e.touches[0].clientY, e.target); }, { passive: true });
+  document.addEventListener('touchmove', (e) => { if (e.touches.length === 1) gestureMove(e.touches[0].clientX, e.touches[0].clientY); }, { passive: true });
+  document.addEventListener('touchend', gestureEnd, { passive: true });
+  document.addEventListener('touchcancel', gestureEnd, { passive: true });
+}
+
+// ---------- rendering ----------
+function renderAll() {
+  $('topDate').textContent = new Date().toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' });
+  ({ today: renderToday, meals: renderMeals, nomikai: renderNomi, workout: renderWorkoutTab, weight: renderWeight, supps: renderSupps, settings: renderSettings })[current]?.();
+}
+
+function nextSupp() {
+  const on = S.supps.filter((s) => s.enabled !== false).sort((a, b) => a.time.localeCompare(b.time));
+  if (!on.length) return null;
+  const n = nowHM();
+  return on.find((s) => s.time >= n) || { ...on[0], tomorrow: true };
+}
+
+function renderToday() {
+  const t = totals(today()); const p = S.profile;
+  $('tKcal').textContent = r0(t.kcal);
+  const left = p.kcalTarget - t.kcal;
+  $('tKcalLeft').textContent = left >= 0 ? `あと ${r0(left)} kcal (目標 ${p.kcalTarget})` : `目標を ${r0(-left)} kcal 超過`;
+  $('tKcalBar').style.width = Math.min(100, t.kcal / p.kcalTarget * 100) + '%';
+  $('tP').textContent = r0(t.p);
+  const pl = p.proteinTarget - t.p;
+  $('tPLeft').textContent = pl > 0 ? `あと ${r0(pl)} g` : '目標達成';
+  $('tPBar').style.width = Math.min(100, t.p / p.proteinTarget * 100) + '%';
+  const C = 2 * Math.PI * 46; const ring = $('ringFill');
+  ring.style.strokeDasharray = C; ring.style.strokeDashoffset = C * (1 - Math.min(1, t.kcal / p.kcalTarget));
+
+  const w = S.weights; const latest = w[0];
+  if (latest) {
+    const weekAgo = w.find((x) => latest.ts - x.ts >= 6 * 864e5);
+    const d = weekAgo ? latest.kg - weekAgo.kg : null;
+    $('tWeight').innerHTML = `<div class="row between"><div class="big">${r1(latest.kg)}<small>kg</small></div><div style="text-align:right">${d != null ? `<div class="delta ${cls(-d)}">${signed(d, 1)} kg / 週</div>` : '<div class="muted small">1週間分たまると変化を表示</div>'}${latest.fat != null ? `<div class="muted small">体脂肪 ${r1(latest.fat)}%</div>` : ''}</div></div>`;
+  } else $('tWeight').innerHTML = '<span class="muted">まだ記録がありません。体重タブから登録できます。</span>';
+
+  const ex = [...new Set(S.sets.filter((s) => s.date === today()).map((s) => s.exercise))];
+  $('tWorkout').innerHTML = ex.length ? ex.map((e) => `<span class="pill">${esc(e)}</span>`).join(' ') : `<span class="muted">まだ記録なし。通常は ${esc(p.train)} 頃</span>`;
+
+  const ns = nextSupp();
+  $('tSupp').innerHTML = ns ? `<b class="num">${esc(ns.time)}</b> ${esc(ns.name)}${ns.tomorrow ? ' <span class="muted small">(明日)</span>' : ''}` : '<span class="muted">サプリタブでスケジュールを作成できます</span>';
+
+  const lastSugg = S.suggestion?.text || S.meals.find((m) => m.suggestion)?.suggestion;
+  $('mealSuggCard').hidden = !lastSugg;
+  if (lastSugg) $('tSugg').textContent = lastSugg;
+}
+
+function mealRow(m) {
+  return `<div class="item" data-meal="${m.id}">${m.thumb ? `<img class="thumb" src="${m.thumb}" alt="">` : '<div class="thumb"></div>'}<div class="grow"><div class="row between"><b class="num">${r0(m.kcal)} kcal</b><span class="muted small num">${md(dateKey(m.ts))} ${hhmm(m.ts)}</span></div><div class="small muted" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc((m.items||[]).map((i) => i.name).join('、'))}</div><div class="small muted num">P ${r0(m.p)} / F ${r0(m.f)} / C ${r0(m.c)}</div></div></div>`;
+}
+function renderPFC() {
+  const t = totals(today()); const g = targets();
+  $('pfcKcal').textContent = `${r0(t.kcal)} / ${g.kcal} kcal`;
+  const m = (k, name) => { const cur = t[k], tg = g[k]; const left = tg - cur; return `<div class="m ${k}"><div class="small"><span class="sw" style="background:var(--c${k})"></span>${name}</div><b>${r0(cur)}<small> / ${tg} g</small></b><div class="bar"><i style="width:${Math.min(100, cur / Math.max(tg, 1) * 100)}%"></i></div><div class="small ${left < 0 ? 'down' : 'muted'}">${left >= 0 ? `あと ${r0(left)} g` : `${r0(-left)} g 超過`}</div></div>`; };
+  $('pfcBars').innerHTML = m('p', 'たんぱく質') + m('f', '脂質') + m('c', '炭水化物');
+  const kc = (x) => ({ p: x.p * 4, f: x.f * 9, c: x.c * 4 });
+  const row = (label, x) => { const e = kc(x); const tot = e.p + e.f + e.c; if (!tot) return `<div class="small muted">${label}</div><div class="small muted">まだ記録なし</div>`; const seg = (k, nm) => { const pct = e[k] / tot * 100; return `<i class="${k}" style="flex:${pct.toFixed(1)}" title="${nm} ${Math.round(pct)}%">${pct >= 12 ? `${nm}${Math.round(pct)}%` : ''}</i>`; }; return `<div class="small muted">${label}</div><div class="stackbar">${seg('p', 'P')}${seg('f', 'F')}${seg('c', 'C')}</div>`; };
+  $('pfcRatio').innerHTML = row('現在', t) + row('目標', g);
+  const e = kc(t); const tot = e.p + e.f + e.c; const eg = kc(g); const totg = eg.p + eg.f + eg.c;
+  $('pfcNote').textContent = tot ? `エネルギー比 現在 P${Math.round(e.p / tot * 100)}:F${Math.round(e.f / tot * 100)}:C${Math.round(e.c / tot * 100)} / 目標 P${Math.round(eg.p / totg * 100)}:F${Math.round(eg.f / totg * 100)}:C${Math.round(eg.c / totg * 100)}。目標のg数は設定で変更できます。` : '目標のg数は設定で変更できます。';
+}
+function renderSuggestion() {
+  const sg = S.suggestion;
+  if (sg?.text) { $('mealSugg').textContent = sg.text; $('suggMeta').textContent = `${md(dateKey(sg.ts))} ${hhmm(sg.ts)} ${sg.source === 'meal' ? '食事記録時に生成' : '手動で生成'}`; }
+  else { $('suggMeta').textContent = ''; }
+}
+function renderMeals() {
+  renderPFC(); renderSuggestion();
+  const list = $('mealList');
+  list.innerHTML = S.meals.length ? S.meals.slice(0, 60).map(mealRow).join('') : '<div class="muted">まだ記録がありません。上のボタンで撮影すると、AIが料理を判定してカロリーとPFCを計算します。</div>';
+}
+let openMeal = null;
+$('mealList').addEventListener('click', (e) => {
+  const row = e.target.closest('[data-meal]'); if (!row) return;
+  const m = S.meals.find((x) => x.id === row.dataset.meal); if (!m) return;
+  if (openMeal === m.id) { openMeal = null; renderMeals(); return; }
+  openMeal = m.id;
+  row.insertAdjacentHTML('afterend', `<div class="stack" style="padding:6px 0 12px">
+    ${m.thumb ? `<img class="thumb lg" src="${m.thumb}" alt="">` : ''}
+    <table>${(m.items||[]).map((i) => `<tr><td>${esc(i.name)}<div class="muted small">${esc(i.amount)}</div></td><td class="r">${r0(i.kcal)} kcal<div class="muted small">P${r0(i.p)} F${r0(i.f)} C${r0(i.c)}</div></td></tr>`).join('')}</table>
+    ${m.comment ? `<div class="small muted">${esc(m.comment)}</div>` : ''}
+    <div class="label">次の食事の提案</div><div class="sugg">${esc(m.suggestion || '未生成')}</div>
+    <button class="btn sm danger" data-del-meal="${m.id}">この記録を削除</button></div>`);
+});
+$('mealList').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-del-meal]'); if (!b) return;
+  if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'もう一度押すと削除します'; return; }
+  await Store.del('meals', b.dataset.delMeal); openMeal = null; toast('削除しました');
+});
+
+// ---------- AI ----------
+async function initAI() {
+  sample = (await window.claude?.use?.('sample').catch(() => null)) ?? window.__fitlogShim?.sample ?? null;
+  if (sample) { const lim = await sample.limits().catch(() => null); sampleImages = !!lim?.images; }
+  if (!sample || !sampleImages) {
+    for (const id of ['mealStatus', 'wStatus']) { $(id).hidden = false; $(id).textContent = 'この表示ではAI解析が使えません。'; }
+  }
+}
+const aiErr = (e) => ({ bad_key: 'アクセスキーが未設定か違います。設定画面で入力してください', sampling_disabled: 'AI解析が設定されていません(サーバーのANTHROPIC_API_KEY)', not_granted: 'Claudeの利用が許可されていません', rate_limited: '利用回数の上限です。しばらく待ってから再度お試しください', refused: 'この画像は解析できませんでした', invalid_json: '結果を読み取れませんでした。もう一度お試しください', image_rejected: 'この画像形式は送れません。別の写真でお試しください', cancelled: '' })[e?.code] ?? '解析に失敗しました。もう一度お試しください';
+
+function thumbnail(file, max = 400) {
+  return new Promise((res) => {
+    const img = new Image(); const url = URL.createObjectURL(file);
+    img.onload = () => { const s = Math.min(1, max / Math.max(img.width, img.height)); const c = document.createElement('canvas'); c.width = Math.round(img.width * s); c.height = Math.round(img.height * s); c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); URL.revokeObjectURL(url); res(c.toDataURL('image/jpeg', 0.6)); };
+    img.onerror = () => { URL.revokeObjectURL(url); res(null); };
+    img.src = url;
+  });
+}
+
+let draft = null;
+async function analyzeMeal(file) {
+  if (!file) return;
+  if (!sample || !sampleImages) { toast('AI解析はclaude.ai上で開いたときに使えます'); return; }
+  const st = $('mealStatus'); st.hidden = false; st.innerHTML = '<span class="spin"></span>写真を解析中…(数十秒かかることがあります)';
+  const hint = $('mealHint').value.trim();
+  const thumb = await thumbnail(file);
+  try {
+    const r = await sample.json(
+      `あなたは管理栄養士です。添付の食事写真から料理を特定し、日本の一般的な盛り付け量を基準に各品目のカロリーとPFCを推定してください。調味料や油も含めて現実的に見積もります。${hint ? `\n補足: ${hint}` : ''}\n` +
+      '次のJSONオブジェクトだけを返してください(説明文なし):\n' +
+      '{"items":[{"name":"料理名(日本語)","amount":"推定量 例: 茶碗1杯(150g)","kcal":数値,"p":たんぱく質g,"f":脂質g,"c":炭水化物g}],"kcal":合計kcal,"p":合計g,"f":合計g,"c":合計g,"confidence":"low|medium|high","comment":"60字以内の一言。見えにくい物や量の不確かさに触れる"}',
+      { images: [file] });
+    if (!r || !Array.isArray(r.items)) throw { code: 'invalid_json' };
+    draft = { thumb, items: r.items.map((i) => ({ name: String(i.name||''), amount: String(i.amount||''), kcal: +i.kcal||0, p: +i.p||0, f: +i.f||0, c: +i.c||0 })), kcal: +r.kcal||0, p: +r.p||0, f: +r.f||0, c: +r.c||0, confidence: r.confidence, comment: String(r.comment||'') };
+    st.hidden = true; renderDraft();
+  } catch (e) { st.textContent = aiErr(e); if (!st.textContent) st.hidden = true; }
+}
+function renderDraft() {
+  const d = draft; const el = $('mealDraft');
+  if (!d) { el.hidden = true; el.innerHTML = ''; return; }
+  el.hidden = false;
+  el.innerHTML = `<div class="row" style="align-items:flex-start">${d.thumb ? `<img class="thumb" src="${d.thumb}" alt="" style="width:84px;height:84px">` : ''}<div class="grow"><div class="big" style="font-size:30px">${r0(d.kcal)}<small>kcal</small></div><div class="small num">P ${r0(d.p)} / F ${r0(d.f)} / C ${r0(d.c)} g</div><div class="small muted">確信度: ${({low:'低',medium:'中',high:'高'})[d.confidence] || '-'}</div></div></div>
+    <table>${d.items.map((i, idx) => `<tr><td>${esc(i.name)}<div class="muted small">${esc(i.amount)}</div></td><td class="r"><input class="input num" style="width:84px;padding:6px 8px;text-align:right;font-size:15px" inputmode="numeric" value="${r0(i.kcal)}" data-item-kcal="${idx}"></td></tr>`).join('')}</table>
+    <div class="small muted">${esc(d.comment)} kcalは直接編集できます。</div>
+    <div class="grid2"><button class="btn primary" id="saveMeal">保存して次の食事を提案</button><button class="btn" id="discardMeal">やり直す</button></div>`;
+  el.querySelectorAll('[data-item-kcal]').forEach((inp) => inp.addEventListener('change', () => { const i = d.items[+inp.dataset.itemKcal]; const nv = +inp.value || 0; const ratio = i.kcal ? nv / i.kcal : 1; i.kcal = nv; i.p *= ratio; i.f *= ratio; i.c *= ratio; d.kcal = d.items.reduce((a, x) => a + x.kcal, 0); d.p = d.items.reduce((a, x) => a + x.p, 0); d.f = d.items.reduce((a, x) => a + x.f, 0); d.c = d.items.reduce((a, x) => a + x.c, 0); renderDraft(); }));
+  $('discardMeal').onclick = () => { draft = null; renderDraft(); };
+  $('saveMeal').onclick = saveMeal;
+}
+async function saveMeal() {
+  const d = draft; if (!d) return;
+  $('saveMeal').disabled = true;
+  const ts = Date.now();
+  const id = await Store.add('meals', { ts, thumb: d.thumb, items: d.items, kcal: d.kcal, p: d.p, f: d.f, c: d.c, comment: d.comment, suggestion: '' });
+  if (!id) { $('saveMeal').disabled = false; return; }
+  draft = null; renderDraft(); $('mealHint').value = '';
+  toast('保存しました。次の食事を考えています…');
+  const extra = S.meals.some((m) => m.id === id) ? null : d; // db snapshot may not include the new meal yet
+  const text = await generateSuggestion({ ts, extraMeal: extra, lastMeal: d });
+  if (text) { await Store.update('meals', id, { suggestion: text }); await Store.saveSuggestion(text, 'meal'); toast('次の食事の提案ができました'); }
+}
+function suggestionPrompt({ ts, extraMeal, lastMeal }) {
+  const p = S.profile; const g = targets(); const goalJa = { cut: '減量', bulk: '増量(筋肥大)', maintain: '維持' }[p.goal];
+  const t = totals(dateKey(ts)); const t2 = extraMeal ? { kcal: t.kcal + extraMeal.kcal, p: t.p + extraMeal.p, f: t.f + extraMeal.f, c: t.c + extraMeal.c, n: t.n + 1 } : t;
+  const trained = S.sets.some((s) => s.date === dateKey(ts));
+  return `あなたは筋トレをする人向けの食事コーチです。次の食事の具体的な提案を日本語で、箇条書き3〜4行・合計150字程度で返してください。コンビニや家庭で用意しやすい具体例を挙げ、残りカロリーとたんぱく質・脂質・炭水化物の不足分(または超過)を数字で示してください。前置きは不要です。\n` +
+    `現在時刻 ${hhmm(ts)}。目標: ${goalJa}。1日の目標 ${g.kcal}kcal / P ${g.p}g / F ${g.f}g / C ${g.c}g。就寝予定 ${p.bed}。今日のトレーニング: ${trained ? '済み' : 'まだ(通常 ' + p.train + ')'}。\n` +
+    `今日ここまでの合計: ${r0(t2.kcal)}kcal, P ${r0(t2.p)}g, F ${r0(t2.f)}g, C ${r0(t2.c)}g(${t2.n}食)。` +
+    (lastMeal ? `\n直前に食べたもの: ${lastMeal.items.map((i) => `${i.name} ${i.amount}`).join('、')}。` : '');
+}
+async function generateSuggestion(ctx) {
+  if (!sample) { toast('提案はclaude.ai上で開いたときに使えます'); return null; }
+  try { const { text } = await sample(suggestionPrompt(ctx), { cache: false }); return text.trim(); }
+  catch (e) { const m = aiErr(e); if (m) toast(m); return null; }
+}
+$('askSugg').addEventListener('click', async () => {
+  const b = $('askSugg'); b.disabled = true; $('mealSugg').innerHTML = '<span class="spin"></span>今日の記録と目標から考えています…';
+  const text = await generateSuggestion({ ts: Date.now() });
+  if (text) await Store.saveSuggestion(text, 'manual'); else renderSuggestion();
+  if (!text && !S.suggestion?.text) $('mealSugg').textContent = '提案を生成できませんでした。';
+  b.disabled = false;
+});
+$('mealCam').addEventListener('change', (e) => { analyzeMeal(e.target.files[0]); e.target.value = ''; });
+$('mealLib').addEventListener('change', (e) => { analyzeMeal(e.target.files[0]); e.target.value = ''; });
+
+// ---------- exercise catalog with 2-frame pictograms ----------
+// Frame: { h:[x,y] head, L:[polyline...] limbs/torso, G:[gear...] }  in a 100x100 box, side view faces right.
+const STAND_L = [[[50,20],[50,54]], [[50,54],[50,74],[50,94]]];
+const STAND_F = [[[50,20],[50,54]], [[50,54],[42,92]], [[50,54],[58,92]]];
+const BENT_L = [[[60,36],[38,56]], [[38,56],[44,76],[40,94]]];
+const LIE_L = [[[30,58],[58,60]], [[58,60],[72,74],[72,94]]];
+const BENCH = ['bench',10,66,66,66];
+const st = (arm, G = []) => ({ h: [50,13], L: [...STAND_L, arm], G });
+const stf = (arms, G = []) => ({ h: [50,13], L: [...STAND_F, ...arms], G });
+const bent = (arm, G = []) => ({ h: [66,30], L: [...BENT_L, arm], G });
+const lie = (arm, G = []) => ({ h: [19,56], L: [...LIE_L, arm], G: [BENCH, ...G] });
+const EX = [
+  // 胸
+  { n:'ベンチプレス', g:'胸', A: lie([[30,58],[40,50],[32,42]], [['plate',32,42]]), B: lie([[30,58],[31,42],[30,26]], [['plate',30,26]]) },
+  { n:'ダンベルプレス', g:'胸', A: lie([[30,58],[40,50],[32,42]], [['db',32,42]]), B: lie([[30,58],[31,42],[30,26]], [['db',30,26]]) },
+  { n:'インクラインベンチプレス', g:'胸', A: { h:[20,38], L:[[[30,44],[58,62]],[[58,62],[72,76],[72,94]],[[30,44],[40,40],[36,30]]], G:[['bench',24,52,62,70],['plate',36,30]] }, B: { h:[20,38], L:[[[30,44],[58,62]],[[58,62],[72,76],[72,94]],[[30,44],[28,30],[26,16]]], G:[['bench',24,52,62,70],['plate',26,16]] } },
+  { n:'ダンベルフライ', g:'胸', A: { h:[50,16], L:[[[50,24],[50,60]],[[50,60],[42,90]],[[50,60],[58,90]],[[50,30],[30,34],[14,30]],[[50,30],[70,34],[86,30]]], G:[['db',14,30],['db',86,30]] }, B: { h:[50,16], L:[[[50,24],[50,60]],[[50,60],[42,90]],[[50,60],[58,90]],[[50,30],[40,18],[46,8]],[[50,30],[60,18],[54,8]]], G:[['db',46,8],['db',54,8]] } },
+  { n:'チェストプレス', g:'胸', A: { h:[44,20], L:[[[44,28],[44,58]],[[44,58],[60,62],[60,90]],[[44,34],[52,44],[58,36]]], G:[['bench',34,62,70,62],['bench',36,20,36,62],['bar',84,10,84,90],['plate',58,36]] }, B: { h:[44,20], L:[[[44,28],[44,58]],[[44,58],[60,62],[60,90]],[[44,34],[62,34],[80,34]]], G:[['bench',34,62,70,62],['bench',36,20,36,62],['bar',84,10,84,90],['plate',80,34]] } },
+  { n:'腕立て伏せ', g:'胸', A: { h:[82,66], L:[[[76,70],[28,82]],[[28,82],[10,92]],[[76,70],[90,80],[78,92]]], G:[['ground']] }, B: { h:[80,42], L:[[[74,48],[28,76]],[[28,76],[10,92]],[[74,48],[76,70],[78,92]]], G:[['ground']] } },
+  { n:'ケーブルクロスオーバー', g:'胸', A: stf([[[50,26],[30,20],[16,14]],[[50,26],[70,20],[84,14]]], [['cable',6,4,16,14],['cable',94,4,84,14]]), B: stf([[[50,26],[38,38],[46,44]],[[50,26],[62,38],[54,44]]], [['cable',6,4,46,44],['cable',94,4,54,44]]) },
+  { n:'ディップス', g:'胸', A: { h:[50,18], L:[[[50,25],[52,54]],[[52,54],[46,72],[52,84]],[[50,30],[56,44]]], G:[['bar',52,44,84,44]] }, B: { h:[50,32], L:[[[50,39],[54,64]],[[54,64],[48,80],[54,92]],[[50,42],[64,36],[56,44]]], G:[['bar',52,44,84,44]] } },
+  // 背中
+  { n:'デッドリフト', g:'背中', A: { h:[64,38], L:[[[60,44],[40,64]],[[40,64],[52,78],[46,94]],[[60,44],[62,64],[62,84]]], G:[['plate',62,86]] }, B: st([[50,28],[53,44],[55,60]], [['plate',55,62]]) },
+  { n:'ラットプルダウン', g:'背中', A: { h:[48,30], L:[[[48,37],[48,66]],[[48,66],[64,70],[64,92]],[[48,42],[56,26],[60,10]]], G:[['bench',38,70,74,70],['bar',50,10,70,10],['cable',60,0,60,10]] }, B: { h:[48,28], L:[[[48,36],[46,66]],[[46,66],[64,70],[64,92]],[[48,42],[62,44],[58,38]]], G:[['bench',38,70,74,70],['bar',48,38,68,38],['cable',60,0,58,38]] } },
+  { n:'懸垂', g:'背中', A: { h:[50,30], L:[[[50,37],[50,66]],[[50,66],[46,80],[52,92]],[[50,42],[56,26],[58,10]]], G:[['bar',20,10,80,10]] }, B: { h:[50,16], L:[[[50,23],[50,52]],[[50,52],[46,66],[52,78]],[[50,28],[62,20],[58,10]]], G:[['bar',20,10,80,10]] } },
+  { n:'バーベルロウ', g:'背中', A: bent([[60,36],[62,54],[64,70]], [['plate',64,72]]), B: bent([[60,36],[68,46],[56,50]], [['plate',56,52]]) },
+  { n:'ダンベルロウ', g:'背中', A: { h:[70,32], L:[[[64,38],[40,52]],[[40,52],[36,74],[30,94]],[[40,52],[52,60]],[[64,38],[60,50],[56,60]],[[64,38],[70,56],[72,74]]], G:[['bench',20,60,60,60],['db',72,76]] }, B: { h:[70,32], L:[[[64,38],[40,52]],[[40,52],[36,74],[30,94]],[[40,52],[52,60]],[[64,38],[60,50],[56,60]],[[64,38],[74,48],[66,52]]], G:[['bench',20,60,60,60],['db',66,54]] } },
+  { n:'シーテッドロウ', g:'背中', A: { h:[40,26], L:[[[40,33],[40,62]],[[40,62],[62,62],[78,70]],[[40,40],[56,46],[70,48]]], G:[['bar',82,56,82,78],['cable',70,48,96,48],['bench',28,66,60,66]] }, B: { h:[40,26], L:[[[40,33],[40,62]],[[40,62],[62,62],[78,70]],[[40,40],[30,50],[44,50]]], G:[['bar',82,56,82,78],['cable',44,50,96,50],['bench',28,66,60,66]] } },
+  { n:'バックエクステンション', g:'背中', A: { h:[66,88], L:[[[50,56],[30,60],[12,64]],[[50,56],[62,80]],[[56,68],[58,84]]], G:[['rect',40,58,20,7]] }, B: { h:[85,46], L:[[[50,56],[30,60],[12,64]],[[50,56],[78,48]],[[64,52],[66,66]]], G:[['rect',40,58,20,7]] } },
+  // 脚
+  { n:'スクワット', g:'脚', A: st([[50,28],[58,30],[56,24]], [['plate',46,24]]), B: { h:[56,34], L:[[[54,41],[42,62]],[[42,62],[62,72],[50,94]],[[54,46],[62,50],[58,44]]], G:[['plate',50,44]] } },
+  { n:'レッグプレス', g:'脚', A: { h:[28,32], L:[[[34,40],[52,70]],[[52,70],[60,52],[78,46]]], G:[['bench',22,38,42,72],['bar',84,30,76,60]] }, B: { h:[28,32], L:[[[34,40],[52,70]],[[52,70],[72,52],[90,38]]], G:[['bench',22,38,42,72],['bar',96,24,88,52]] } },
+  { n:'レッグエクステンション', g:'脚', A: { h:[42,20], L:[[[42,27],[42,58]],[[42,58],[62,60]],[[62,60],[62,88]]], G:[['bench',30,60,60,60],['bench',34,22,34,60],['pad',64,86]] }, B: { h:[42,20], L:[[[42,27],[42,58]],[[42,58],[62,60]],[[62,60],[88,56]]], G:[['bench',30,60,60,60],['bench',34,22,34,60],['pad',88,56]] } },
+  { n:'レッグカール', g:'脚', A: { h:[16,52], L:[[[24,56],[58,58]],[[58,58],[76,58]],[[76,58],[94,62]]], G:[['bench',16,62,70,62],['pad',92,64]] }, B: { h:[16,52], L:[[[24,56],[58,58]],[[58,58],[76,58]],[[76,58],[76,34]]], G:[['bench',16,62,70,62],['pad',76,32]] } },
+  { n:'ランジ', g:'脚', A: st([[50,28],[52,44],[54,60]], [['db',54,62]]), B: { h:[56,22], L:[[[56,29],[50,58]],[[50,58],[70,62],[72,90]],[[50,58],[36,82],[18,88]],[[56,34],[58,50],[60,64]]], G:[['db',60,66]] } },
+  { n:'ルーマニアンデッドリフト', g:'脚', A: st([[50,28],[53,44],[55,60]], [['plate',55,62]]), B: { h:[70,40], L:[[[64,46],[42,60]],[[42,60],[48,78],[46,94]],[[64,46],[64,64],[64,80]]], G:[['plate',64,82]] } },
+  { n:'カーフレイズ', g:'脚', A: { h:[50,13], L:[[[50,20],[50,54]],[[50,54],[50,74],[50,92]],[[46,92],[60,92]],[[50,28],[52,42],[54,56]]], G:[['db',54,58],['ground']] }, B: { h:[50,9], L:[[[50,16],[50,50]],[[50,50],[50,70],[50,88]],[[50,88],[60,92]],[[50,24],[52,38],[54,52]]], G:[['db',54,54],['ground']] } },
+  { n:'ヒップスラスト', g:'脚', A: { h:[16,50], L:[[[24,54],[50,72]],[[50,72],[70,66],[74,92]],[[26,56],[40,66]]], G:[['bench',6,58,30,58],['plate',50,64]] }, B: { h:[16,50], L:[[[24,54],[56,52]],[[56,52],[72,62],[74,92]],[[28,56],[44,52]]], G:[['bench',6,58,30,58],['plate',56,44]] } },
+  // 肩
+  { n:'ショルダープレス', g:'肩', A: { h:[50,19], L:[[[50,26],[50,58]],[[50,58],[50,76],[50,94]],[[50,34],[60,38],[58,26]]], G:[['db',58,24]] }, B: { h:[50,19], L:[[[50,26],[50,58]],[[50,58],[50,76],[50,94]],[[50,34],[53,22],[55,10]]], G:[['db',55,8]] } },
+  { n:'サイドレイズ', g:'肩', A: stf([[[50,26],[40,42],[38,54]],[[50,26],[60,42],[62,54]]], [['db',38,56],['db',62,56]]), B: stf([[[50,26],[30,26],[12,24]],[[50,26],[70,26],[88,24]]], [['db',12,24],['db',88,24]]) },
+  { n:'フロントレイズ', g:'肩', A: st([[50,28],[52,42],[54,56]], [['db',54,58]]), B: st([[50,28],[68,28],[86,28]], [['db',88,28]]) },
+  { n:'リアレイズ', g:'肩', A: bent([[60,36],[62,52],[64,66]], [['db',64,68]]), B: bent([[60,36],[46,26],[34,20]], [['db',34,20]]) },
+  { n:'アップライトロウ', g:'肩', A: st([[50,28],[52,42],[54,56]], [['plate',54,58]]), B: st([[50,28],[66,30],[54,34]], [['plate',54,36]]) },
+  { n:'フェイスプル', g:'肩', A: st([[50,28],[66,26],[82,24]], [['cable',82,24,96,22]]), B: st([[50,28],[66,16],[56,18]], [['cable',56,18,96,22]]) },
+  // 腕
+  { n:'バーベルカール', g:'腕', A: st([[50,28],[52,44],[54,60]], [['plate',54,62]]), B: st([[50,28],[52,44],[64,32]], [['plate',64,30]]) },
+  { n:'ダンベルカール', g:'腕', A: st([[50,28],[52,44],[54,60]], [['db',54,62]]), B: st([[50,28],[52,44],[64,32]], [['db',64,30]]) },
+  { n:'ハンマーカール', g:'腕', A: st([[50,28],[52,44],[54,60]], [['dbv',54,62]]), B: st([[50,28],[52,44],[64,32]], [['dbv',64,30]]) },
+  { n:'トライセプスプッシュダウン', g:'腕', A: st([[50,28],[58,42],[66,30]], [['cable',72,0,66,30]]), B: st([[50,28],[58,42],[70,56]], [['cable',72,0,70,56]]) },
+  { n:'キックバック', g:'腕', A: bent([[60,36],[70,46],[62,56]], [['db',62,58]]), B: bent([[60,36],[70,46],[84,40]], [['db',86,40]]) },
+  { n:'ライイングエクステンション', g:'腕', A: lie([[30,58],[32,40],[18,30]], [['plate',16,30]]), B: lie([[30,58],[32,40],[34,24]], [['plate',34,22]]) },
+  // 腹
+  { n:'クランチ', g:'腹', A: { h:[14,78], L:[[[22,80],[52,80]],[[52,80],[66,62],[80,88]],[[26,78],[22,70]]], G:[['ground']] }, B: { h:[18,60], L:[[[26,66],[52,80]],[[52,80],[66,62],[80,88]],[[30,66],[22,60]]], G:[['ground']] } },
+  { n:'プランク', g:'腹', A: { h:[82,48], L:[[[76,54],[30,66]],[[30,66],[10,82]],[[76,54],[80,82],[92,82]]], G:[['ground']] }, B: { h:[82,48], L:[[[76,54],[30,66]],[[30,66],[10,82]],[[76,54],[80,82],[92,82]]], G:[['ground']] } },
+  { n:'レッグレイズ', g:'腹', A: { h:[14,78], L:[[[22,80],[52,80]],[[28,80],[40,80]],[[52,80],[72,80],[92,80]]], G:[['ground']] }, B: { h:[14,78], L:[[[22,80],[52,80]],[[28,80],[40,80]],[[52,80],[56,56],[60,32]]], G:[['ground']] } },
+  { n:'アブローラー', g:'腹', A: { h:[40,36], L:[[[40,43],[40,66]],[[40,66],[40,90]],[[40,90],[22,92]],[[40,48],[52,60],[62,72]]], G:[['wheel',64,76],['ground']] }, B: { h:[72,46], L:[[[66,52],[40,74]],[[40,74],[40,90]],[[40,90],[22,92]],[[66,52],[80,66],[92,78]]], G:[['wheel',94,80],['ground']] } },
+  { n:'ハンギングレッグレイズ', g:'腹', A: { h:[50,30], L:[[[50,37],[50,66]],[[50,66],[48,80],[52,94]],[[50,42],[56,26],[58,10]]], G:[['bar',20,10,80,10]] }, B: { h:[50,30], L:[[[50,37],[50,66]],[[50,66],[72,64],[92,62]],[[50,42],[56,26],[58,10]]], G:[['bar',20,10,80,10]] } },
+];
+const GROUPS = ['胸', '背中', '脚', '肩', '腕', '腹'];
+const EX_BY = Object.fromEntries(EX.map((e) => [e.n, e]));
+const GENERIC = { A: st([[50,28],[52,42],[54,54]]), B: st([[50,28],[52,42],[54,54]]) };
+function gearSvg(g) {
+  switch (g[0]) {
+    case 'plate': return `<circle class="gear" cx="${g[1]}" cy="${g[2]}" r="5.5"/>`;
+    case 'db': return `<line class="gearl" x1="${g[1]-7}" y1="${g[2]}" x2="${g[1]+7}" y2="${g[2]}"/><circle class="gear" cx="${g[1]-7}" cy="${g[2]}" r="3"/><circle class="gear" cx="${g[1]+7}" cy="${g[2]}" r="3"/>`;
+    case 'dbv': return `<line class="gearl" x1="${g[1]}" y1="${g[2]-7}" x2="${g[1]}" y2="${g[2]+7}"/><circle class="gear" cx="${g[1]}" cy="${g[2]-7}" r="3"/><circle class="gear" cx="${g[1]}" cy="${g[2]+7}" r="3"/>`;
+    case 'bar': return `<line class="gearl thick" x1="${g[1]}" y1="${g[2]}" x2="${g[3]}" y2="${g[4]}"/>`;
+    case 'bench': return `<line class="benchl" x1="${g[1]}" y1="${g[2]}" x2="${g[3]}" y2="${g[4]}"/>`;
+    case 'cable': return `<line class="cablel" x1="${g[1]}" y1="${g[2]}" x2="${g[3]}" y2="${g[4]}"/>`;
+    case 'wheel': return `<circle class="gear" cx="${g[1]}" cy="${g[2]}" r="5"/>`;
+    case 'pad': return `<rect class="gear" x="${g[1]-4}" y="${g[2]-4}" width="8" height="8" rx="2"/>`;
+    case 'rect': return `<rect class="benchr" x="${g[1]}" y="${g[2]}" width="${g[3]}" height="${g[4]}" rx="2"/>`;
+    case 'ground': return `<line class="benchl" x1="4" y1="94" x2="96" y2="94"/>`;
+    default: return '';
+  }
+}
+function frameSvg(f, cls) {
+  return `<g class="${cls}">${(f.G || []).map(gearSvg).join('')}${f.L.map((pl) => `<polyline class="limb" points="${pl.map((p) => p.join(',')).join(' ')}"/>`).join('')}<circle class="head" cx="${f.h[0]}" cy="${f.h[1]}" r="6"/></g>`;
+}
+function picto(name, size = 64) {
+  const e = EX_BY[name] || GENERIC;
+  return `<svg class="pic" viewBox="0 0 100 100" width="${size}" height="${size}" aria-hidden="true">${frameSvg(e.A, 'fA')}${frameSvg(e.B, 'fB')}</svg>`;
+}
+
+// ---------- workout ----------
+let exercise = '';
+let grp = '最近';
+let wkSeg = 'log';
+$('wkSeg').addEventListener('click', (e) => { const b = e.target.closest('[data-seg]'); if (!b) return; wkSeg = b.dataset.seg; renderWorkoutTab(); window.scrollTo(0, 0); });
+function renderWorkoutTab() {
+  document.querySelectorAll('#wkSeg button').forEach((b) => b.classList.toggle('on', b.dataset.seg === wkSeg));
+  $('wkLog').hidden = wkSeg !== 'log'; $('wkGrowth').hidden = wkSeg !== 'growth';
+  if (wkSeg === 'growth') renderGrowth(); else renderWorkout();
+}
+setInterval(() => { if (current === 'workout') document.body.classList.toggle('alt'); }, 800);
+function chooseExercise(name, reset) {
+  exercise = name; $('exName').value = name; pickerOpen = !name;
+  if (reset) { const last = setsOn(name, today()).slice(-1)[0] || (prevDate(name, today()) ? setsOn(name, prevDate(name, today()))[0] : null); if (last) { $('kg').value = last.kg; $('reps').value = last.reps; } }
+  renderWorkout();
+}
+let pickerOpen = true;
+$('exName').addEventListener('input', () => { exercise = $('exName').value.trim(); renderWorkoutDetails(); });
+$('exName').addEventListener('change', () => { if ($('exName').value.trim()) chooseExercise($('exName').value.trim(), true); });
+$('exGrid').addEventListener('click', (e) => { const c = e.target.closest('[data-ex]'); if (c) chooseExercise(c.dataset.ex, true); });
+$('grpChips').addEventListener('click', (e) => { const c = e.target.closest('[data-grp]'); if (c) { grp = c.dataset.grp; renderPicker(); } });
+$('exChange').addEventListener('click', () => { pickerOpen = true; renderWorkout(); });
+const recentEx = () => { const seen = []; for (const s of [...S.sets].sort((a, b) => b.ts - a.ts)) if (!seen.includes(s.exercise)) seen.push(s.exercise); return seen.slice(0, 9); };
+function renderPicker() {
+  const groups = ['最近', ...GROUPS];
+  $('grpChips').innerHTML = groups.map((g) => `<button class="chip ${g === grp ? 'on' : ''}" data-grp="${g}">${g}</button>`).join('');
+  const names = grp === '最近' ? recentEx() : EX.filter((e) => e.g === grp).map((e) => e.n);
+  $('exGrid').innerHTML = names.length ? names.map((n) => `<button class="extile ${n === exercise ? 'on' : ''}" data-ex="${esc(n)}">${picto(n, 56)}<span>${esc(n)}</span></button>`).join('') : '<div class="muted small" style="grid-column:1/-1">記録した種目がここに並びます。部位から選んでください。</div>';
+}
+document.querySelectorAll('[data-step]').forEach((b) => b.addEventListener('click', () => { const inp = $(b.dataset.step); const v = Math.max(0, (+inp.value || 0) + +b.dataset.d); inp.value = b.dataset.step === 'kg' ? +v.toFixed(2) : Math.round(v); }));
+$('addSet').addEventListener('click', async () => {
+  const name = $('exName').value.trim(); const kg = +$('kg').value; const reps = +$('reps').value;
+  if (!name || !(reps > 0)) { toast('種目と回数を入力してください'); return; }
+  exercise = name;
+  const key = today(); const idx = setsOn(name, key).length + 1; const ts = Date.now();
+  const ex = findSession(name, key);
+  const ok = ex ? (await Store.update('sessions', ex.id, { sets: [...(ex.sets || []), { kg, reps, ts }] }), true) : await Store.add('sessions', { ts, date: key, exercise: name, sets: [{ kg, reps, ts }] });
+  if (ok !== null) { toast(`セット ${idx} を記録`); renderWorkout(); }
+});
+function renderWorkout() {
+  if (grp === '最近' && !recentEx().length) grp = '胸';
+  const showPicker = pickerOpen || !exercise;
+  $('exPicker').hidden = !showPicker; $('exSel').hidden = showPicker;
+  if (showPicker) renderPicker(); else { $('exSelPic').innerHTML = picto(exercise, 56); $('exSelName').textContent = exercise; $('exSelGroup').textContent = EX_BY[exercise] ? EX_BY[exercise].g : 'カスタム種目'; }
+  renderWorkoutDetails();
+}
+function renderWorkoutDetails() {
+  $('addSet').textContent = exercise ? `セット ${setsOn(exercise, today()).length + 1} を記録` : 'セットを記録';
+  const key = today();
+  const todayAll = S.sets.filter((s) => s.date === key).sort((a, b) => a.ts - b.ts);
+  $('todaySets').innerHTML = todayAll.length ? todayAll.map((s) => `<div class="item"><span class="muted small num" style="width:44px">${hhmm(s.ts)}</span><span class="grow">${esc(s.exercise)}</span><b class="num">${r1(s.kg)} kg × ${s.reps}</b><button class="btn sm danger" data-del-set="${s.id}" aria-label="削除">×</button></div>`).join('') : '<div class="muted">まだ記録なし</div>';
+  const cmp = $('cmpCard'); const hist = $('histCard');
+  if (!exercise) { cmp.hidden = true; hist.hidden = true; return; }
+  const cur = setsOn(exercise, key); const pd = prevDate(exercise, key); const prev = pd ? setsOn(exercise, pd) : [];
+  cmp.hidden = false;
+  $('cmpTitle').textContent = pd ? `今日 vs 前回 (${md(pd)})` : '今日 (初回)';
+  const vol = (ss) => ss.reduce((a, s) => a + s.kg * s.reps, 0); const mx = (ss) => Math.max(0, ...ss.map((s) => s.kg));
+  const stat = (l, v, d, dg) => `<div class="stat"><div class="label">${l}</div><b>${v}</b><span class="delta ${cls(d)} small">${pd ? signed(d, dg) : '—'}</span></div>`;
+  $('cmpStats').innerHTML = stat('ボリューム', r0(vol(cur)) + ' kg', vol(cur) - vol(prev), 0) + stat('最大重量', r1(mx(cur)), mx(cur) - mx(prev), 1) + stat('セット', cur.length, cur.length - prev.length, 0);
+  const n = Math.max(cur.length, prev.length);
+  $('cmpTable').innerHTML = n ? `<tr><th>#</th><th>今日</th><th>前回</th><th class="r">差</th></tr>` + Array.from({ length: n }, (_, i) => { const a = cur[i], b = prev[i]; const d = a && b ? a.kg * a.reps - b.kg * b.reps : 0; return `<tr><td class="muted">${i + 1}</td><td><b>${a ? `${r1(a.kg)} × ${a.reps}` : '—'}</b></td><td class="muted">${b ? `${r1(b.kg)} × ${b.reps}` : '—'}</td><td class="r delta ${cls(d)}">${a && b ? signed(d) : ''}</td></tr>`; }).join('') : '<tr><td class="muted">この種目は初回です。今日の記録が次回の比較対象になります。</td></tr>';
+  const ss = sessionStats(exercise);
+  hist.hidden = ss.length < 2;
+  if (ss.length >= 2) {
+    const first = ss[0], last = ss[ss.length - 1];
+    $('histTitle').textContent = `${exercise} の推移 (${ss.length}回)`;
+    $('histChart').innerHTML = barChart(ss.slice(-12).map((s) => ({ label: md(s.date), v: s.volume, today: s.date === key })));
+    $('histNote').innerHTML = `推定1RM ${r1(first.best)} → <b>${r1(last.best)} kg</b> (<span class="delta ${cls(last.best - first.best)}">${signed(last.best - first.best, 1)}</span>) ・ 最大重量 ${r1(first.max)} → <b>${r1(last.max)} kg</b>。棒はセッションの総ボリューム(重量×回数の合計)。`;
+  }
+}
+$('todaySets').addEventListener('click', async (e) => { const b = e.target.closest('[data-del-set]'); if (!b) return; if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = '削除?'; return; } await deleteSet(b.dataset.delSet); renderWorkout(); });
+async function deleteSet(setId) {
+  const [sid, i] = setId.split(':'); const ss = S.sessions.find((x) => x.id === sid); if (!ss) return;
+  const sets = (ss.sets || []).filter((_, k) => k !== +i);
+  if (sets.length) await Store.update('sessions', sid, { sets }); else await Store.del('sessions', sid);
+}
+
+// ---------- import from 筋トレMEMO ----------
+let imp = [];
+const impYear = () => { const y = +$('impYear').value; return y > 1990 && y < 2100 ? y : new Date().getFullYear(); };
+const normDate = (d) => { let m = String(d || '').match(/(\d{4})[\/\-.年](\d{1,2})[\/\-.月](\d{1,2})/); if (m) return `${m[1]}-${pad(m[2])}-${pad(m[3])}`; m = String(d || '').match(/(\d{1,2})[\/\-.月](\d{1,2})/); if (m) return `${impYear()}-${pad(m[1])}-${pad(m[2])}`; return null; };
+function setImpStatus(html) { const st = $('impStatus'); st.hidden = !html; st.innerHTML = html || ''; }
+function mergeImport(rows) {
+  for (const r of rows || []) {
+    const date = normDate(r.date); const exercise = String(r.exercise || '').trim(); const sets = (r.sets || []).map((x) => ({ kg: +x.kg || 0, reps: +x.reps || 0 })).filter((x) => x.reps > 0);
+    if (!date || !exercise || !sets.length) continue;
+    const ex = imp.find((x) => x.date === date && x.exercise === exercise);
+    if (ex) ex.sets.push(...sets); else imp.push({ date, exercise, sets });
+  }
+  imp.sort((a, b) => a.date.localeCompare(b.date));
+  renderImport();
+}
+function renderImport() {
+  const el = $('impPreview'); el.hidden = !imp.length; if (!imp.length) { el.innerHTML = ''; return; }
+  const dup = (r) => !!findSession(r.exercise, r.date);
+  const n = imp.length, d = imp.filter(dup).length, sets = imp.reduce((a, r) => a + r.sets.length, 0);
+  el.innerHTML = `<div class="label" style="margin-top:8px">プレビュー: ${n}セッション / ${sets}セット${d ? ` (${d}件は同じ日・種目が既にあるためスキップ)` : ''}</div>
+    <table>${imp.map((r, i) => `<tr${dup(r) ? ' class="muted"' : ''}><td class="num" style="white-space:nowrap">${r.date.slice(2).replace(/-/g, '/')}</td><td>${esc(r.exercise)}</td><td class="r num small">${r.sets.map((x) => `${+x.kg}×${x.reps}`).join(' ')}</td><td class="r"><button class="btn sm danger" data-imp-del="${i}" aria-label="除外">×</button></td></tr>`).join('')}</table>
+    <div class="grid2" style="margin-top:8px"><button class="btn primary" id="impCommit">${n - d}件を取り込む</button><button class="btn" id="impClear">クリア</button></div>`;
+  $('impCommit').onclick = commitImport; $('impClear').onclick = () => { imp = []; renderImport(); setImpStatus(''); };
+  $('impCommit').disabled = n - d === 0;
+}
+$('impPreview').addEventListener('click', (e) => { const b = e.target.closest('[data-imp-del]'); if (b) { imp.splice(+b.dataset.impDel, 1); renderImport(); } });
+async function commitImport() {
+  $('impCommit').disabled = true; let ok = 0, skip = 0, fail = 0;
+  for (const r of imp) {
+    if (findSession(r.exercise, r.date)) { skip++; continue; }
+    const [y, m, d] = r.date.split('-').map(Number); const ts = new Date(y, m - 1, d, 12).getTime();
+    setImpStatus(`<span class="spin"></span>取り込み中… ${ok + skip + fail + 1}/${imp.length}`);
+    const id = await Store.add('sessions', { ts, date: r.date, exercise: r.exercise, source: 'kintore-memo', sets: r.sets.map((x, i) => ({ kg: x.kg, reps: x.reps, ts: ts + i })) });
+    if (id) ok++; else { fail++; break; }
+  }
+  if (!db) { /* local store already updated */ }
+  imp = []; renderImport();
+  setImpStatus(`取り込み完了: ${ok}件追加${skip ? `、${skip}件スキップ` : ''}${fail ? `、${fail}件失敗(容量や権限を確認してください)` : ''}`);
+  toast(`${ok}セッションを取り込みました`); renderWorkout();
+}
+const IMP_FORMAT = '次のJSON配列だけを返してください(説明文なし): [{"date":"YYYY-MM-DD","exercise":"種目名","sets":[{"kg":数値,"reps":数値}]}] 。同じ日・同じ種目は1つにまとめ、セットは表示順。自重で重量が無ければkgは0。読み取れない数字は入れない。';
+$('impShots').addEventListener('change', async (e) => {
+  const files = [...e.target.files]; e.target.value = ''; if (!files.length) return;
+  if (!sample || !sampleImages) { toast('AI読み取りはclaude.ai上で開いたときに使えます'); return; }
+  const lim = await sample.limits().catch(() => null); const per = Math.max(1, Math.min(lim?.images?.maxCount || 1, 8));
+  for (let i = 0; i < files.length; i += per) {
+    const chunk = files.slice(i, i + per);
+    setImpStatus(`<span class="spin"></span>スクリーンショットを読み取り中… ${Math.min(i + per, files.length)}/${files.length}枚`);
+    try {
+      const r = await sample.json(`添付は筋トレ記録アプリ「筋トレMEMO」の履歴画面のスクリーンショットです。写っているトレーニング記録(日付・種目・重量kg・回数)をすべて読み取ってください。日付に年が無い場合は ${impYear()} 年とします。\n` + IMP_FORMAT, { images: chunk });
+      mergeImport(Array.isArray(r) ? r : r?.sessions);
+    } catch (e2) { setImpStatus(aiErr(e2) || ''); return; }
+  }
+  setImpStatus(imp.length ? '読み取り結果を確認して「取り込む」を押してください。' : '記録を読み取れませんでした。履歴が見える画面のスクリーンショットをお試しください。');
+});
+$('impParse').addEventListener('click', () => {
+  const rows = [];
+  for (const line of $('impText').value.split(/\r?\n/)) {
+    const c = line.split(/[,\t、]/).map((x) => x.trim()); if (c.length < 4) continue;
+    const date = normDate(c[0]); const kg = parseFloat(c[2]); const reps = parseInt(c[3], 10);
+    if (!date || !(reps > 0)) continue;
+    rows.push({ date, exercise: c[1], sets: [{ kg: Number.isFinite(kg) ? kg : 0, reps }] });
+  }
+  if (!rows.length) { setImpStatus('読める行がありません。「日付, 種目, 重量, 回数」の順か、「AIで整形」をお試しください。'); return; }
+  mergeImport(rows); setImpStatus(`${rows.length}行を読みました。内容を確認して「取り込む」を押してください。`);
+});
+$('impAI').addEventListener('click', async () => {
+  const text = $('impText').value.trim(); if (!text) { toast('テキストを貼り付けてください'); return; }
+  if (!sample) { toast('AI整形はclaude.ai上で開いたときに使えます'); return; }
+  setImpStatus('<span class="spin"></span>AIで整形中…');
+  try {
+    const r = await sample.json(`次のテキストは筋トレの記録です。日付・種目・重量kg・回数を抽出してください。年が無い場合は ${impYear()} 年とします。\n` + IMP_FORMAT + '\n\n' + text.slice(0, 20000), { modelTier: 'quick' });
+    mergeImport(Array.isArray(r) ? r : r?.sessions); setImpStatus(imp.length ? '内容を確認して「取り込む」を押してください。' : '記録を読み取れませんでした。');
+  } catch (e2) { setImpStatus(aiErr(e2) || ''); }
+});
+
+function barChart(rows) {
+  const W = 340, H = 150, padL = 36, padB = 22, padT = 8; const max = Math.max(1, ...rows.map((r) => r.v));
+  const nice = Math.pow(10, Math.floor(Math.log10(max))); const top = Math.ceil(max / nice) * nice;
+  const bw = (W - padL - 8) / rows.length; const y = (v) => padT + (H - padT - padB) * (1 - v / top);
+  const grid = [0, .5, 1].map((f) => `<line class="grid" x1="${padL}" x2="${W - 4}" y1="${y(top * f)}" y2="${y(top * f)}"></line><text x="${padL - 6}" y="${y(top * f) + 4}" text-anchor="end">${Math.round(top * f)}</text>`).join('');
+  const step = Math.max(1, Math.ceil(rows.length / 6));
+  const bars = rows.map((r, i) => { const x = padL + i * bw + bw * 0.15; const w = bw * 0.7; const h = y(0) - y(r.v); const lab = (i % step === 0 || i === rows.length - 1) ? `<text x="${x + w / 2}" y="${H - 6}" text-anchor="middle">${r.label}</text>` : ''; return `<rect class="vbar ${r.today ? 'today' : ''} ${r.dim ? 'dim' : ''}" x="${x}" y="${y(r.v)}" width="${w}" height="${h}" rx="3"><title>${r.label}: ${Math.round(r.v)} kg</title></rect>${lab}`; }).join('');
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="セッションごとの総ボリューム">${grid}${bars}</svg>`;
+}
+function lineChart(rows, opt = {}) {
+  const unit = opt.unit ?? 'kg'; const dg = opt.decimals ?? 1;
+  const W = 340, H = opt.height ?? 150, padL = 40, padR = 12, padB = 22, padT = 10;
+  const vs = rows.map((r) => r.v); let lo = Math.min(...vs), hi = Math.max(...vs); if (hi - lo < 1) { lo -= .5; hi += .5; } const span = hi - lo; lo -= span * .15; hi += span * .15;
+  const x = (i) => padL + (W - padL - padR) * (rows.length === 1 ? .5 : i / (rows.length - 1)); const y = (v) => padT + (H - padT - padB) * (1 - (v - lo) / (hi - lo));
+  const tickStep = dg ? 0.5 : 1;
+  const ticks = [lo + (hi - lo) * .1, (lo + hi) / 2, hi - (hi - lo) * .1].map((v) => Math.round(v / tickStep) * tickStep);
+  const grid = [...new Set(ticks)].map((v) => `<line class="grid" x1="${padL}" x2="${W - padR}" y1="${y(v)}" y2="${y(v)}"></line><text x="${padL - 6}" y="${y(v) + 4}" text-anchor="end">${v.toFixed(dg)}</text>`).join('');
+  const pts = rows.map((r, i) => `${x(i)},${y(r.v)}`).join(' ');
+  const area = `M${x(0)},${y(lo)} L${pts.replace(/ /g, ' L')} L${x(rows.length - 1)},${y(lo)} Z`;
+  const dots = rows.map((r, i) => `<circle class="dot" cx="${x(i)}" cy="${y(r.v)}" r="${i === rows.length - 1 ? 5 : 3.5}"><title>${r.label}: ${r.v.toFixed(dg)} ${unit}</title></circle>`).join('');
+  const step = Math.max(1, Math.ceil(rows.length / 5));
+  const labels = rows.map((r, i) => (i % step === 0 || i === rows.length - 1) ? `<text x="${x(i)}" y="${H - 6}" text-anchor="middle">${r.label}</text>` : '').join('');
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${opt.label || '推移'}"><path class="area" d="${area}"></path>${grid}<polyline class="line" points="${pts}"></polyline>${dots}${labels}</svg>`;
+}
+
+// ---------- growth ----------
+let rangeWeeks = 12;
+$('rangeChips').addEventListener('click', (e) => { const c = e.target.closest('[data-range]'); if (!c) return; rangeWeeks = +c.dataset.range; document.querySelectorAll('#rangeChips .chip').forEach((x) => x.classList.toggle('on', x === c)); renderGrowth(); });
+const weekStart = (ts) => { const d = new Date(ts); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return d.getTime(); };
+function renderGrowth() {
+  const since = rangeWeeks ? weekStart(Date.now()) - (rangeWeeks - 1) * 7 * 864e5 : 0;
+  const sets = S.sets.filter((s) => s.ts >= since);
+  const head = $('gLoadHead');
+  if (!S.sets.length) { head.innerHTML = '<span class="muted">筋トレを記録すると表示されます</span>'; $('gLoadChart').innerHTML = ''; $('gLoadNote').textContent = ''; $('gShare').innerHTML = '<span class="muted">—</span>'; $('gExercises').innerHTML = ''; return; }
+  // weekly total load
+  const thisWk = weekStart(Date.now());
+  const firstWk = rangeWeeks ? since : weekStart(Math.min(...S.sets.map((s) => s.ts)));
+  const weeks = []; for (let t = firstWk; t <= thisWk; t += 7 * 864e5) weeks.push(t);
+  const byWk = {}; const setsWk = {};
+  for (const s of sets) { const k = weekStart(s.ts); byWk[k] = (byWk[k] || 0) + s.kg * s.reps; setsWk[k] = (setsWk[k] || 0) + 1; }
+  const rows = weeks.map((t) => ({ label: md(dateKey(t)), v: byWk[t] || 0, today: t === thisWk, dim: t === thisWk }));
+  const cur = byWk[thisWk] || 0, prev = byWk[thisWk - 7 * 864e5] || 0;
+  const done = weeks.filter((t) => t !== thisWk && byWk[t]); const avg = done.length ? done.reduce((a, t) => a + byWk[t], 0) / done.length : 0;
+  head.innerHTML = `<div><div class="big" style="font-size:30px">${r0(cur).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}<small>kg 今週</small></div><div class="small muted">${setsWk[thisWk] || 0} セット</div></div><div style="text-align:right"><div class="delta ${cls(cur - prev)}">${prev ? signed(cur - prev) + ' kg vs 先週' : '先週の記録なし'}</div><div class="small muted">${done.length ? `期間平均 ${r0(avg)} kg/週` : ''}</div></div>`;
+  $('gLoadChart').innerHTML = rows.length > 1 ? barChart(rows.slice(-26)) : '';
+  $('gLoadNote').textContent = '週は月曜始まり。今週(オレンジ)は進行中の値です。';
+  // share by exercise
+  const byEx = {}; for (const s of sets) byEx[s.exercise] = (byEx[s.exercise] || 0) + s.kg * s.reps;
+  const total = Object.values(byEx).reduce((a, b) => a + b, 0) || 1;
+  const exList = Object.entries(byEx).sort((a, b) => b[1] - a[1]);
+  $('gShare').innerHTML = exList.length ? exList.slice(0, 10).map(([n, v]) => `<div class="row" style="margin:6px 0"><span class="small" style="width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(n)}</span><div class="hbar"><i style="width:${(v / total * 100).toFixed(1)}%"></i></div><span class="small num" style="width:64px;text-align:right">${Math.round(v / total * 100)}% <span class="muted">${r0(v / 1000)}t</span></span></div>`).join('') : '<span class="muted">期間内の記録がありません</span>';
+  // per-exercise trajectories
+  const cards = exList.map(([name]) => {
+    const all = sessionStats(name); const inRange = all.filter((x) => new Date(x.date + 'T12:00').getTime() >= since);
+    const ss = inRange.length >= 2 ? inRange : all.slice(-8);
+    if (ss.length < 1) return '';
+    const first = ss[0], last = ss[ss.length - 1]; const d = last.best - first.best; const pct = first.best ? d / first.best * 100 : 0;
+    const pr = Math.max(...all.map((x) => x.best)); const isPr = last.best >= pr && all.length > 1;
+    return `<div class="card" data-ex-open="${esc(name)}"><div class="exhead"><div class="row" style="min-width:0">${picto(name, 36)}<h3>${esc(name)}</h3></div><span class="small muted num">${md(first.date)} → ${md(last.date)} ・ ${ss.length}回</span></div>
+      <div class="row between" style="margin:6px 0 2px"><div><span class="big" style="font-size:26px">${r1(last.best)}<small>kg 推定1RM</small></span>${isPr ? ' <span class="pill">自己ベスト</span>' : ''}</div><div style="text-align:right"><div class="delta ${cls(d)}">${ss.length > 1 ? `${signed(d, 1)} kg (${signed(pct)}%)` : '初回'}</div><div class="small muted">最大 ${r1(last.max)} kg ・ ${last.sets} set</div></div></div>
+      ${ss.length > 1 ? lineChart(ss.map((x) => ({ label: md(x.date), v: x.best })), { unit: 'kg', decimals: 1, height: 120, label: name + ' の推定1RM' }) : '<div class="muted small">2回以上記録すると軌道を描きます</div>'}</div>`;
+  }).join('');
+  $('gExercises').innerHTML = cards || '<div class="muted">期間内の記録がありません</div>';
+}
+$('gExercises').addEventListener('click', (e) => { const c = e.target.closest('[data-ex-open]'); if (c) { wkSeg = 'log'; chooseExercise(c.dataset.exOpen, true); renderWorkoutTab(); window.scrollTo(0, 0); } });
+
+// ---------- 飲み会 (Notion 🍻飲み会 DB と連携) ----------
+const NOMI_DS = 'collection://3cf821f3-6a98-8089-acda-000b21c8dea5';
+const NOMI_DS_ID = '3cf821f3-6a98-8089-acda-000b21c8dea5';
+const MEMBER_DS = 'collection://43028787-e29a-4c3d-8182-16d514a794fd';
+const NOMI_DB_URL = 'https://app.notion.com/p/3cf821f36a98808983eefb4234ee331f';
+const PEOPLE = ['井之上','関谷','丸田','村山会','伊藤遼','中尾','横山','大越','宮坂','つっちー','壮行会','SCM/Pの会','富永','朝比奈','尾堂','飯田','村山組の人たち','辻くん歓迎会','平日決算会','藤井','江黒','大須賀','麻奈','松尾','唐門','村山','矢久保','今西','未央','冨永','栁川','相川','けんとく','内藤','松本','柳川','岡本','前川','セラミックスCNA','アドセラ'];
+const DRINKS = ['ビール', 'ハイボール', 'ウイスキー', 'チューハイ', '日本酒', 'ワイン', 'その他'];
+const QUICK = DRINKS.slice(0, 5);
+let mcp = null, notionRows = Local.read('notionRows') || [], memberMap = Local.read('memberMap') || {}, notionState = 'unknown';
+let calMonth = (() => { const d = new Date(); return [d.getFullYear(), d.getMonth()]; })();
+let calSel = null;
+const yen = (n) => '¥' + Math.round(n || 0).toLocaleString('ja-JP');
+const DRAFT_KEY = 'nomiDraft';
+const draft0 = () => ({ shop: '', date: today(), members: [], taps: [], pay: '', taxi: '', taxiPlace: '' });
+let nd = { ...draft0(), ...(Local.read(DRAFT_KEY) || {}) };
+if (!Array.isArray(nd.taps)) { nd.taps = []; for (const [d, n] of Object.entries(nd.drinks || {})) for (let i = 0; i < n; i++) nd.taps.push({ d, ts: Date.now() }); }
+delete nd.drinks;
+const tally = (taps) => { const o = {}; for (const t of taps || []) o[t.d] = (o[t.d] || 0) + 1; return o; };
+const cups = (taps) => (taps || []).length;
+const saveDraft = () => Local.write(DRAFT_KEY, nd);
+
+// Merge Notion rows and app-local entries into one list of events {date, shop, cups, drinks, members, pay, taxi, taxiPlace, url, local}
+function nomiEvents() {
+  const out = [];
+  for (const r of notionRows) {
+    const date = (r['date:飲み会日付:start'] || '').slice(0, 10); if (!date) continue;
+    let members = []; try { members = JSON.parse(r['参加者'] || '[]'); } catch {}
+    out.push({ date, shop: r['店の名前'] || '', cups: +r['杯数'] || 0, drinksText: r['飲んだもの'] || '', members, pay: +r['石橋支払い'] || 0, taxi: +r['タクシー費用'] || 0, taxiPlace: r['タクシー場所'] || '', url: r.url || '', source: 'notion' });
+  }
+  for (const e of S.nomikai) {
+    if (e.notionUrl && out.some((x) => x.url === e.notionUrl)) { const x = out.find((y) => y.url === e.notionUrl); if (!x.cups && e.cups) { x.cups = e.cups; x.drinksText = e.drinksText; } if (e.taps?.length) x.taps = e.taps; continue; }
+    if (out.some((x) => x.date === e.date && x.shop === e.shop)) continue;
+    out.push({ date: e.date, shop: e.shop, cups: e.cups || 0, drinksText: e.drinksText || '', taps: e.taps || [], members: e.members || [], pay: e.pay || 0, taxi: e.taxi || 0, taxiPlace: e.taxiPlace || '', url: e.notionUrl || '', source: e.notionUrl ? 'notion' : 'local', id: e.id });
+  }
+  return out.sort((a, b) => b.date.localeCompare(a.date));
+}
+
+async function initNotion() {
+  mcp = (await window.claude?.use?.('mcp').catch(() => null)) ?? window.__fitlogShim?.mcp ?? null;
+  if (!mcp) { notionState = 'none'; renderNomiStatus(); return; }
+  try {
+    const { servers } = await mcp.listTools('Notion');
+    const sv = servers.find((s) => s.server === 'Notion');
+    notionState = !sv || !sv.tools.length ? 'not_connected' : sv.authStatus === 'needs_reauth' ? 'needs_reauth' : 'ready';
+  } catch (e) { notionState = 'error'; }
+  renderNomiStatus();
+  if (notionState === 'ready') refreshNotion(false);
+}
+const mcpErr = (e) => ({
+  bad_key: 'アクセスキーが未設定か違います。設定画面で入力してください',
+  needs_reauth: 'Notionの接続が切れています。claude.aiの設定 → コネクタ でNotionを再接続してください',
+  server_not_connected: 'Notionが接続されていません。claude.aiの設定 → コネクタ でNotionを追加してください',
+  selection_required: 'Notionコネクタが複数あります。claude.aiで使う方を選んでください',
+  not_in_manifest: 'このページからNotionを使う許可がありません。ページの許可設定で有効にしてください',
+  approval_required: 'Notionへの書き込みには承認が必要です。表示されたダイアログで許可してください',
+  blocked_by_policy: '組織のポリシーでNotionの利用がブロックされています',
+  server_unavailable: 'Notionが応答しません。しばらくして再試行してください',
+  tool_error: 'Notionがエラーを返しました: ' + (e?.message || '').slice(0, 120),
+  cancelled: '',
+})[e?.code] ?? ('Notionとの通信に失敗しました' + (e?.message ? ` (${String(e.message).slice(0, 80)})` : ''));
+
+async function refreshNotion(fresh) {
+  if (!mcp || notionState !== 'ready') return;
+  const st = $('nomiSync'); st.textContent = 'Notionから読み込み中…';
+  try {
+    const opts = fresh ? { cache: { refresh: true, staleTime: 0, gcTime: 600000 } } : { cache: { staleTime: 300000, gcTime: 600000 } };
+    const r = await mcp.callTool('Notion', 'notion-query-data-sources', { data: { mode: 'rows', data_source_url: NOMI_DS, sort: [{ property: '飲み会日付', direction: 'descending' }], limit: 100 } }, opts);
+    const rows = r.payload?.results; if (Array.isArray(rows)) { notionRows = rows; Local.write('notionRows', rows); }
+    if (!Object.keys(memberMap).length || fresh) {
+      const m = await mcp.callTool('Notion', 'notion-query-data-sources', { data: { mode: 'rows', data_source_url: MEMBER_DS, limit: 100 } }, { cache: { staleTime: 86400000, gcTime: 86400000 } });
+      const mr = m.payload?.results; if (Array.isArray(mr)) { memberMap = Object.fromEntries(mr.filter((x) => x['参加者'] && x.url).map((x) => [x['参加者'], x.url])); Local.write('memberMap', memberMap); }
+    }
+    st.textContent = `Notionと同期済み (${notionRows.length}件${r.cache?.storedAt ? '・' + hhmm(r.cache.storedAt) + '時点' : ''})`;
+  } catch (e) { const m = mcpErr(e); st.textContent = m; if (['needs_reauth', 'server_not_connected'].includes(e?.code)) notionState = e.code; }
+  renderNomi();
+}
+function renderNomiStatus() {
+  const st = $('nomiSync');
+  st.textContent = { none: 'この表示ではNotion連携は使えません(claude.aiで開くと記録できます)。記録はアプリ内に保存されます。', not_connected: window.__fitlogShim ? 'Notion連携が未設定です。VercelにNOTION_API_KEYを設定すると飲み会DBに書き込めます。' : 'Notionが接続されていません。claude.aiの設定 → コネクタ でNotionを追加すると、飲み会DBに書き込めます。', needs_reauth: 'Notionの接続が切れています。claude.aiの設定 → コネクタ で再接続してください。', error: 'Notionの状態を確認できませんでした。', ready: 'Notion接続済み', unknown: 'Notion接続を確認中…' }[notionState];
+  $('nomiSave').textContent = notionState === 'ready' ? 'Notionに記録' : 'アプリに記録';
+}
+
+// ---- calendar ----
+function renderCalendar() {
+  const [y, m] = calMonth; const ev = nomiEvents();
+  const byDay = {}; for (const e of ev) (byDay[e.date] ||= []).push(e);
+  const first = new Date(y, m, 1); const startDow = (first.getDay() + 6) % 7; const days = new Date(y, m + 1, 0).getDate();
+  const todayKey = today();
+  let cells = '';
+  for (let i = 0; i < startDow; i++) cells += '<div class="cday empty"></div>';
+  for (let d = 1; d <= days; d++) {
+    const key = `${y}-${pad(m + 1)}-${pad(d)}`; const es = byDay[key] || []; const c = es.reduce((a, e) => a + e.cups, 0);
+    cells += `<button class="cday ${es.length ? 'has' : ''} ${key === todayKey ? 'today' : ''} ${calSel === key ? 'sel' : ''}" data-day="${key}"><span>${d}</span>${es.length ? `<i>${c ? c + '杯' : '●'}</i>` : ''}</button>`;
+  }
+  const mk = `${y}-${pad(m + 1)}`; const month = ev.filter((e) => e.date.startsWith(mk));
+  $('calTitle').textContent = `${y}年${m + 1}月`;
+  $('calGrid').innerHTML = '<div class="cdow">月</div><div class="cdow">火</div><div class="cdow">水</div><div class="cdow">木</div><div class="cdow">金</div><div class="cdow">土</div><div class="cdow">日</div>' + cells;
+  $('calSummary').innerHTML = `<div class="stat"><div class="label">回数</div><b>${month.length}</b></div><div class="stat"><div class="label">杯数</div><b>${month.reduce((a, e) => a + e.cups, 0)}</b></div><div class="stat"><div class="label">支払い</div><b style="font-size:18px">${yen(month.reduce((a, e) => a + e.pay, 0))}</b></div><div class="stat"><div class="label">タクシー</div><b style="font-size:18px">${yen(month.reduce((a, e) => a + e.taxi, 0))}</b></div>`;
+  const sel = calSel ? (byDay[calSel] || []) : [];
+  $('calDetail').innerHTML = calSel ? (sel.length ? sel.map(evRow).join('') : `<div class="muted small">${md(calSel)} は飲み会なし</div>`) : '';
+}
+const evRow = (e) => `<div class="item" style="align-items:flex-start"><div style="width:48px"><b class="num">${md(e.date)}</b>${e.cups ? `<div class="small"><b>${e.cups}</b>杯</div>` : ''}</div><div class="grow"><div><b>${esc(e.shop || '(店名なし)')}</b>${e.source === 'local' ? ' <span class="pill">未同期</span>' : ''}</div><div class="small muted">${esc(e.members.join('、'))}</div><div class="small muted num">${e.pay ? yen(e.pay) : ''}${e.taxi ? ` ・ タクシー ${yen(e.taxi)}${e.taxiPlace ? '(' + esc(e.taxiPlace) + ')' : ''}` : ''}${e.drinksText ? ' ・ ' + esc(e.drinksText) : ''}</div>${e.taps?.length ? `<div class="taps" style="margin-top:4px">${e.taps.map((x) => `<span class="tap">${hhmm(x.ts)} ${esc(x.d)}</span>`).join('')}</div>` : ''}</div>${e.url ? `<a class="small" href="${esc(e.url)}" target="_blank" rel="noopener">Notion</a>` : ''}</div>`;
+$('calPrev').addEventListener('click', () => { calMonth = calMonth[1] === 0 ? [calMonth[0] - 1, 11] : [calMonth[0], calMonth[1] - 1]; renderCalendar(); });
+$('calNext').addEventListener('click', () => { calMonth = calMonth[1] === 11 ? [calMonth[0] + 1, 0] : [calMonth[0], calMonth[1] + 1]; renderCalendar(); });
+$('calGrid').addEventListener('click', (e) => { const b = e.target.closest('[data-day]'); if (!b) return; calSel = calSel === b.dataset.day ? null : b.dataset.day; renderCalendar(); });
+
+// ---- form ----
+function renderNomiForm() {
+  $('nShop').value = nd.shop; $('nDate').value = nd.date; $('nPay').value = nd.pay; $('nTaxi').value = nd.taxi; $('nTaxiPlace').value = nd.taxiPlace;
+  const recent = []; for (const e of nomiEvents()) for (const m of e.members) if (!recent.includes(m)) recent.push(m);
+  const people = [...nd.members.filter((p) => !PEOPLE.includes(p)), ...recent.filter((p) => PEOPLE.includes(p)), ...PEOPLE.filter((p) => !recent.includes(p))];
+  $('nPeople').innerHTML = people.map((p) => `<button class="chip ${nd.members.includes(p) ? 'on' : ''}" data-person="${esc(p)}">${esc(p)}</button>`).join('');
+  const t = tally(nd.taps);
+  $('nQuick').innerHTML = QUICK.map((d) => `<button type="button" class="qbtn ${t[d] ? 'on' : ''}" data-tap="${d}"><b>${t[d] || 0}</b><span>${d}</span></button>`).join('');
+  $('nMore').innerHTML = DRINKS.slice(5).map((d) => `<button type="button" class="chip ${t[d] ? 'on' : ''}" data-tap="${d}">${d} ${t[d] || 0}</button>`).join('');
+  $('nCups').textContent = cups(nd.taps);
+  $('nTaps').innerHTML = nd.taps.map((x) => `<span class="tap">${hhmm(x.ts)} ${esc(x.d)}</span>`).join('');
+  if (nd.taps.length >= 2) { const mins = (nd.taps[nd.taps.length - 1].ts - nd.taps[0].ts) / 60000; $('nPace').textContent = `${hhmm(nd.taps[0].ts)}開始 ・ ${Math.round(mins)}分で${nd.taps.length}杯${mins >= 20 ? ` (${(nd.taps.length / (mins / 60)).toFixed(1)}杯/時)` : ''}`; }
+  else if (nd.taps.length === 1) $('nPace').textContent = `${hhmm(nd.taps[0].ts)}に1杯目`;
+  else $('nPace').textContent = '飲んだらボタンをタップ';
+  $('nUndo').disabled = !nd.taps.length;
+}
+$('nPeople').addEventListener('click', (e) => { const c = e.target.closest('[data-person]'); if (!c) return; const p = c.dataset.person; nd.members = nd.members.includes(p) ? nd.members.filter((x) => x !== p) : [...nd.members, p]; saveDraft(); renderNomiForm(); });
+$('nAddPerson').addEventListener('click', () => { const v = $('nNewPerson').value.trim(); if (!v) return; if (!nd.members.includes(v)) nd.members.push(v); $('nNewPerson').value = ''; saveDraft(); renderNomiForm(); });
+document.addEventListener('click', (e) => { const b = e.target.closest('[data-tap]'); if (!b) return; nd.taps.push({ d: b.dataset.tap, ts: Date.now() }); saveDraft(); renderNomiForm(); });
+$('nUndo').addEventListener('click', () => { const x = nd.taps.pop(); if (x) toast(`${hhmm(x.ts)} ${x.d} を取り消し`); saveDraft(); renderNomiForm(); });
+for (const [id, key] of [['nShop', 'shop'], ['nDate', 'date'], ['nPay', 'pay'], ['nTaxi', 'taxi'], ['nTaxiPlace', 'taxiPlace']]) $(id).addEventListener('input', () => { nd[key] = $(id).value; saveDraft(); });
+$('nClear').addEventListener('click', () => { nd = draft0(); saveDraft(); renderNomiForm(); });
+const drinksText = (taps) => { const t = tally(taps); return DRINKS.filter((d) => t[d] > 0).map((d) => `${d}${t[d]}`).join('、'); };
+const tapsText = (taps) => (taps || []).map((x) => `${hhmm(x.ts)} ${x.d}`).join(' / ');
+
+$('nomiSave').addEventListener('click', async () => {
+  if (!nd.shop.trim()) { toast('店の名前を入力してください'); return; }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(nd.date)) { toast('日付を入力してください'); return; }
+  const btn = $('nomiSave'); btn.disabled = true;
+  const rec = { ts: Date.now(), date: nd.date, shop: nd.shop.trim(), members: nd.members, taps: nd.taps, cups: cups(nd.taps), drinksText: drinksText(nd.taps), pay: +nd.pay || 0, taxi: +nd.taxi || 0, taxiPlace: nd.taxiPlace.trim(), notionUrl: '' };
+  let url = '';
+  if (mcp && notionState === 'ready') {
+    const st = $('nomiSync'); st.innerHTML = '<span class="spin"></span>Notionに書き込み中…';
+    const known = rec.members.filter((m) => PEOPLE.includes(m)); const unknown = rec.members.filter((m) => !PEOPLE.includes(m));
+    const rel = rec.members.map((m) => memberMap[m]).filter(Boolean);
+    const props = { '店の名前': rec.shop, 'date:飲み会日付:start': rec.date, 'date:飲み会日付:is_datetime': 0, '参加者': known, '杯数': rec.cups, '飲んだもの': rec.drinksText };
+    if (rec.pay) props['石橋支払い'] = rec.pay; if (rec.taxi) props['タクシー費用'] = rec.taxi; if (rec.taxiPlace) props['タクシー場所'] = rec.taxiPlace; if (rel.length) props['参加メンバー'] = rel;
+    const content = (unknown.length ? `参加者(その他): ${unknown.join('、')}\n` : '') + (rec.drinksText ? `飲んだもの: ${rec.drinksText}(計${rec.cups}杯)\n` : '') + (rec.taps.length ? `タイムライン: ${tapsText(rec.taps)}\n` : '') + 'FitLogアプリから記録';
+    try {
+      const r = await mcp.callTool('Notion', 'notion-create-pages', { parent: { type: 'data_source_id', data_source_id: NOMI_DS_ID }, pages: [{ properties: props, content }], allow_async: false });
+      const text = JSON.stringify(r.payload ?? r.content ?? ''); const m = text.match(/https:\/\/(?:app\.notion\.com\/p|www\.notion\.so)\/[0-9a-f]{32}/); url = m ? m[0] : '';
+      rec.notionUrl = url;
+      st.textContent = 'Notionに記録しました' + (unknown.length ? `(${unknown.join('、')} は参加者の選択肢に無いため本文に記載)` : '');
+      mcp.invalidate('Notion', 'notion-query-data-sources').catch(() => {});
+    } catch (e) {
+      const m = mcpErr(e); st.textContent = (m || 'Notionへの書き込みが中断されました') + '。アプリ内には保存します';
+      if (['server_unavailable', 'upstream_error'].includes(e?.code)) st.textContent += '(Notion側に作成されている可能性があります。重複に注意)';
+    }
+  }
+  const id = await Store.add('nomikai', rec);
+  btn.disabled = false;
+  if (id) { toast(url ? 'Notionとアプリに記録しました' : 'アプリに記録しました'); nd = draft0(); saveDraft(); calMonth = [+rec.date.slice(0, 4), +rec.date.slice(5, 7) - 1]; calSel = rec.date; renderNomi(); if (url) setTimeout(() => refreshNotion(true), 1500); }
+});
+$('nomiRefresh').addEventListener('click', () => refreshNotion(true));
+function renderNomi() { renderCalendar(); renderNomiForm(); const ev = nomiEvents(); $('nomiList').innerHTML = ev.length ? ev.slice(0, 30).map(evRow).join('') : '<div class="muted">まだ記録がありません</div>'; }
+
+// ---------- weight ----------
+function renderWeight() {
+  const w = S.weights; const latest = w[0];
+  const week = latest ? w.filter((x) => latest.ts - x.ts < 7 * 864e5) : []; const prevWeek = latest ? w.filter((x) => latest.ts - x.ts >= 7 * 864e5 && latest.ts - x.ts < 14 * 864e5) : [];
+  const avg = (a) => a.length ? a.reduce((s, x) => s + x.kg, 0) / a.length : 0;
+  $('wLatest').innerHTML = latest ? `<div class="row between"><div class="big">${r1(latest.kg)}<small>kg</small></div><div style="text-align:right">${week.length && prevWeek.length ? `<div class="delta ${cls(-(avg(week) - avg(prevWeek)))}">週平均 ${signed(avg(week) - avg(prevWeek), 1)} kg</div>` : ''}<div class="muted small">${md(dateKey(latest.ts))} ${hhmm(latest.ts)} ・ ${({ manual: '手入力', photo: '写真' })[latest.source] || ''}${latest.fat != null ? ` ・ 体脂肪 ${r1(latest.fat)}%` : ''}</div></div></div>` : '<span class="muted">まだ記録がありません</span>';
+  const series = [...w].reverse().slice(-30);
+  $('wChart').innerHTML = series.length >= 2 ? lineChart(series.map((x) => ({ label: md(dateKey(x.ts)), v: x.kg }))) : '';
+  $('wList').innerHTML = w.length ? w.slice(0, 40).map((x, i) => { const p = w[i + 1]; const d = p ? x.kg - p.kg : null; return `<div class="item"><span class="muted small num" style="width:86px">${md(dateKey(x.ts))} ${hhmm(x.ts)}</span><b class="grow num">${r1(x.kg)} kg${x.fat != null ? ` <span class="muted small">${r1(x.fat)}%</span>` : ''}</b>${d != null ? `<span class="delta ${cls(-d)} small">${signed(d, 1)}</span>` : ''}<button class="btn sm danger" data-del-w="${x.id}" aria-label="削除">×</button></div>`; }).join('') : '<div class="muted">まだ記録がありません</div>';
+}
+$('wList').addEventListener('click', async (e) => { const b = e.target.closest('[data-del-w]'); if (!b) return; if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = '削除?'; return; } await Store.del('weights', b.dataset.delW); renderWeight(); });
+async function saveWeight(source) {
+  const kg = +$('wKg').value; const fat = $('wFat').value === '' ? null : +$('wFat').value;
+  if (!(kg > 0)) { toast('体重を入力してください'); return; }
+  const id = await Store.add('weights', { ts: Date.now(), kg, fat: Number.isFinite(fat) ? fat : null, source });
+  if (id) { $('wKg').value = ''; $('wFat').value = ''; toast('体重を保存しました'); renderWeight(); }
+}
+$('saveWeight').addEventListener('click', () => saveWeight('manual'));
+$('scaleCam').addEventListener('change', async (e) => {
+  const file = e.target.files[0]; e.target.value = ''; if (!file) return;
+  if (!sample || !sampleImages) { toast('AI読み取りはclaude.ai上で開いたときに使えます'); return; }
+  const st = $('wStatus'); st.hidden = false; st.innerHTML = '<span class="spin"></span>体重計の表示を読み取り中…';
+  try {
+    const r = await sample.json('添付は体重計(またはアプリ画面)の写真です。表示されている数値を正確に読み取ってください。lb表示ならkgに換算しnoteに書くこと。推測で数値を作らないこと。\n次のJSONだけを返してください: {"weight_kg":数値またはnull,"body_fat_pct":数値またはnull,"note":"読み取りの補足"}', { images: [file], modelTier: 'quick' });
+    if (r?.weight_kg == null) { st.textContent = '読み取れませんでした。' + (r?.note || ''); return; }
+    $('wKg').value = r.weight_kg; $('wFat').value = r.body_fat_pct ?? '';
+    st.innerHTML = `読み取り結果: <b>${esc(r.weight_kg)} kg</b>${r.body_fat_pct != null ? ` / 体脂肪 ${esc(r.body_fat_pct)}%` : ''}。${esc(r.note || '')} 確認して「保存」を押してください。`;
+    $('saveWeight').onclick = () => { saveWeight('photo'); $('saveWeight').onclick = () => saveWeight('manual'); st.hidden = true; };
+  } catch (e2) { st.textContent = aiErr(e2); if (!st.textContent) st.hidden = true; }
+});
+
+// ---------- supplements ----------
+const addMin = (hm, d) => { const [h, m] = hm.split(':').map(Number); const t = (((h * 60 + m + d) % 1440) + 1440) % 1440; return `${pad(Math.floor(t / 60))}:${pad(t % 60)}`; };
+function plan(p) {
+  return [
+    { name: 'プロテイン(起床後)', time: addMin(p.wake, 15), reason: '睡眠中の空腹状態を早めに解消し、1日のたんぱく質摂取を分散させる' },
+    { name: 'マルチビタミン', time: addMin(p.wake, 60), reason: '朝食と一緒に摂ると脂溶性ビタミンの吸収がよい' },
+    { name: 'プロテイン(トレ後)', time: addMin(p.train, 60), reason: 'トレーニング後の筋たんぱく合成が高まる時間帯に合わせる' },
+    { name: 'クレアチン', time: addMin(p.train, 60), reason: '毎日同じ時間に継続して摂ることが重要。食事やプロテインと一緒に' },
+    { name: 'プロテイン(就寝前)', time: addMin(p.bed, -45), reason: '就寝中のたんぱく質供給。カゼイン系または牛乳割りがおすすめ' },
+  ];
+}
+$('genPlan').addEventListener('click', async () => {
+  let n = 0;
+  for (const it of plan(S.profile)) { if (S.supps.some((s) => s.name === it.name)) continue; if (await Store.add('supps', { ...it, ts: Date.now(), enabled: true })) n++; }
+  toast(n ? `${n}件を追加しました` : 'すでに追加済みです'); renderSupps();
+});
+$('addSupp').addEventListener('click', async () => {
+  const name = $('sName').value.trim(); const time = $('sTime').value;
+  if (!name || !/^\d\d:\d\d$/.test(time)) { toast('名前と時刻を入力してください'); return; }
+  if (await Store.add('supps', { name, time, reason: '', ts: Date.now(), enabled: true })) { $('sName').value = ''; toast('追加しました'); renderSupps(); }
+});
+function renderSupps() {
+  const list = [...S.supps].sort((a, b) => a.time.localeCompare(b.time)); const n = nowHM(); const next = nextSupp();
+  $('suppList').innerHTML = list.length ? list.map((s) => `<div class="item" style="align-items:flex-start"><div style="width:58px"><b class="num" style="font:600 20px var(--num)">${esc(s.time)}</b>${next && next.id === s.id && !next.tomorrow ? '<div class="pill">次</div>' : s.time < n && s.enabled !== false ? '<div class="muted small">済</div>' : ''}</div><div class="grow"><div>${esc(s.name)}</div>${s.reason ? `<div class="muted small">${esc(s.reason)}</div>` : ''}<div class="row" style="margin-top:4px"><input type="time" class="input" style="width:auto;padding:4px 8px;font-size:14px" value="${esc(s.time)}" data-time="${s.id}"><button class="btn sm danger" data-del-s="${s.id}">削除</button></div></div><button class="switch ${s.enabled !== false ? 'on' : ''}" data-toggle="${s.id}" aria-label="有効"></button></div>`).join('') : '<div class="muted">まだありません。「提案を生成」で設定の生活リズムから作成します。</div>';
+}
+$('suppList').addEventListener('click', async (e) => {
+  const t = e.target.closest('[data-toggle]'); if (t) { const s = S.supps.find((x) => x.id === t.dataset.toggle); await Store.update('supps', s.id, { enabled: s.enabled === false }); renderSupps(); return; }
+  const d = e.target.closest('[data-del-s]'); if (d) { if (d.dataset.confirm !== '1') { d.dataset.confirm = '1'; d.textContent = '削除?'; return; } await Store.del('supps', d.dataset.delS); renderSupps(); }
+});
+$('suppList').addEventListener('change', async (e) => { const i = e.target.closest('[data-time]'); if (i && /^\d\d:\d\d$/.test(i.value)) { await Store.update('supps', i.dataset.time, { time: i.value }); toast('時刻を変更しました'); renderSupps(); } });
+
+// ---------- settings ----------
+function renderSettings() {
+  const p = S.profile;
+  $('keyCard').hidden = !window.__fitlogShim;
+  try { $('pKey').value = localStorage.getItem('fitlog:key') || ''; } catch {}
+  $('pKcal').value = p.kcalTarget; $('pProt').value = p.proteinTarget; $('pFat').value = p.fatTarget || ''; $('pCarb').value = p.carbTarget || ''; $('pWake').value = p.wake; $('pTrain').value = p.train; $('pBed').value = p.bed;
+  document.querySelectorAll('#goalChips .chip').forEach((c) => c.classList.toggle('on', c.dataset.goal === p.goal));
+}
+$('goalChips').addEventListener('click', (e) => { const c = e.target.closest('[data-goal]'); if (c) { S.profile = { ...S.profile, goal: c.dataset.goal }; renderSettings(); } });
+$('saveProfile').addEventListener('click', async () => {
+  const p = { ...S.profile, kcalTarget: +$('pKcal').value || DEF_PROFILE.kcalTarget, proteinTarget: +$('pProt').value || DEF_PROFILE.proteinTarget, fatTarget: +$('pFat').value || null, carbTarget: +$('pCarb').value || null, wake: $('pWake').value || DEF_PROFILE.wake, train: $('pTrain').value || DEF_PROFILE.train, bed: $('pBed').value || DEF_PROFILE.bed };
+  try { localStorage.setItem('fitlog:key', $('pKey').value.trim()); } catch {}
+  await Store.saveProfile(p); toast('設定を保存しました'); go('today');
+});
+
+// ---------- boot ----------
+go(location.hash.slice(1) || 'today');
+Store.init();
+initAI();
+initNotion();
+setInterval(() => { if (current === 'today' || current === 'supps') renderAll(); }, 60000);
+})();
+</script>
+
+</body>
+</html>

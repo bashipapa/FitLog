@@ -1,0 +1,77 @@
+{
+  "expo": {
+    "name": "FitLog",
+    "slug": "fitlog",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "fitlog",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "食事や体重計を撮影して記録するために使用します",
+        "NSPhotoLibraryUsageDescription": "食事の写真を選んで記録するために使用します",
+        "NSHealthShareUsageDescription": "Apple Healthから体重と体脂肪率を読み取ります",
+        "NSHealthUpdateUsageDescription": "体重データを書き込むことはありません"
+      },
+      "bundleIdentifier": "com.example.fitlog"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "backgroundImage": "./assets/images/android-icon-background.png",
+        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "package": "com.example.fitlog",
+      "permissions": [
+        "CAMERA",
+        "POST_NOTIFICATIONS",
+        "SCHEDULE_EXACT_ALARM"
+      ]
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "server",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash-icon.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#ffffff"
+        }
+      ],
+      "expo-sqlite",
+      "expo-secure-store",
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "食事や体重計を撮影して記録するために使用します",
+          "photosPermission": "食事の写真を選んで記録するために使用します"
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#0a7ea4"
+        }
+      ],
+      [
+        "react-native-health",
+        {
+          "healthSharePermission": "Apple Healthから体重と体脂肪率を読み取ります",
+          "healthUpdatePermission": "体重データを書き込むことはありません"
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
